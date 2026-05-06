@@ -2,3 +2,6 @@ anthropic>=0.40.0
 python-telegram-bot>=21.0
 apscheduler>=3.10.0
 pytz>=2024.1
+google-auth>=2.15.0
+google-auth-oauthlib>=1.0.0
+google-api-python-client>=2.70.0

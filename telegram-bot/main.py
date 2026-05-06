@@ -5,7 +5,10 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import pytz
-from datetime import datetime
+from datetime import datetime, timedelta
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -70,10 +73,75 @@ Today's date: {date}
 
 conversation_histories = {}
 
+CALENDAR_IDS = [
+    "sjdekrieger@gmail.com",
+    "cgocm6sga6ms54gfehs5plhl0r0th7e1@import.calendar.google.com",
+    "imj5l9oo6882eb8sqikef7bcrs@group.calendar.google.com",
+]
 
-def get_system_prompt():
+
+def get_google_creds():
+    creds = Credentials(
+        token=None,
+        refresh_token=os.environ.get("GOOGLE_REFRESH_TOKEN"),
+        client_id=os.environ.get("GOOGLE_CLIENT_ID"),
+        client_secret=os.environ.get("GOOGLE_CLIENT_SECRET"),
+        token_uri="https://oauth2.googleapis.com/token",
+        scopes=["https://www.googleapis.com/auth/calendar.readonly"],
+    )
+    creds.refresh(Request())
+    return creds
+
+
+def get_calendar_context(days=1):
+    try:
+        service = build("calendar", "v3", credentials=get_google_creds(), cache_discovery=False)
+        tz = pytz.timezone("Europe/Amsterdam")
+        now = datetime.now(tz)
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=days)
+
+        events = []
+        for cal_id in CALENDAR_IDS:
+            try:
+                result = service.events().list(
+                    calendarId=cal_id,
+                    timeMin=start.isoformat(),
+                    timeMax=end.isoformat(),
+                    singleEvents=True,
+                    orderBy="startTime",
+                ).execute()
+                events.extend(result.get("items", []))
+            except Exception:
+                pass
+
+        if not events:
+            return "No events scheduled today."
+
+        events.sort(key=lambda e: e["start"].get("dateTime", e["start"].get("date", "")))
+        lines = []
+        for e in events:
+            title = e.get("summary", "Untitled")
+            start_raw = e["start"].get("dateTime", e["start"].get("date", ""))
+            if "T" in start_raw:
+                t = datetime.fromisoformat(start_raw).astimezone(tz).strftime("%H:%M")
+                lines.append(f"- {t} — {title}")
+            else:
+                lines.append(f"- All day — {title}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"Calendar fetch failed: {e}")
+        return ""
+
+
+def get_system_prompt(include_calendar=True):
     date = datetime.now(pytz.timezone("Europe/Amsterdam")).strftime("%Y-%m-%d, %A")
-    return SYSTEM_PROMPT.format(date=date)
+    prompt = SYSTEM_PROMPT.format(date=date)
+    if include_calendar and os.environ.get("GOOGLE_REFRESH_TOKEN"):
+        calendar = get_calendar_context()
+        if calendar:
+            prompt += f"\n\n## Today's Calendar\n{calendar}"
+    return prompt
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
