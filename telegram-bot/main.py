@@ -126,19 +126,69 @@ async def send_morning_checkin(bot):
     await bot.send_message(chat_id=int(STEF_CHAT_ID), text=response.content[0].text)
 
 
+async def send_evening_checkin(bot):
+    if not STEF_CHAT_ID:
+        return
+
+    response = anthropic_client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=512,
+        system=get_system_prompt(),
+        messages=[{
+            "role": "user",
+            "content": "Send me a short evening check-in. Brief reflection — what's worth thinking about before I wind down?"
+        }]
+    )
+
+    await bot.send_message(chat_id=int(STEF_CHAT_ID), text=response.content[0].text)
+
+
+async def send_weekly_review(bot):
+    if not STEF_CHAT_ID:
+        return
+
+    response = anthropic_client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=768,
+        system=get_system_prompt(),
+        messages=[{
+            "role": "user",
+            "content": "It's Sunday evening — send me a short weekly review. What should I reflect on from this week, and what's the main focus for next week? Keep it tight and honest."
+        }]
+    )
+
+    await bot.send_message(chat_id=int(STEF_CHAT_ID), text=response.content[0].text)
+
+
 async def post_init(application: Application):
     if STEF_CHAT_ID:
         scheduler = AsyncIOScheduler(timezone=pytz.timezone("Europe/Amsterdam"))
         scheduler.add_job(
             send_morning_checkin,
             "cron",
-            hour=8,
+            hour=7,
+            minute=0,
+            args=[application.bot]
+        )
+        scheduler.add_job(
+            send_evening_checkin,
+            "cron",
+            day_of_week="mon-sat",
+            hour=23,
+            minute=0,
+            args=[application.bot]
+        )
+        scheduler.add_job(
+            send_weekly_review,
+            "cron",
+            day_of_week="sun",
+            hour=23,
             minute=0,
             args=[application.bot]
         )
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
-        logger.info("Scheduled morning check-ins at 08:00 CET")
+        logger.info("Scheduled: morning 07:00, evening 23:00 (Mon-Sat), weekly review 23:00 (Sun)")
     else:
         logger.info("STEF_CHAT_ID not set — scheduled messages disabled")
 
