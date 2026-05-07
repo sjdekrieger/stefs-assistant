@@ -137,8 +137,11 @@ def get_calendar_context(days=1):
 def get_system_prompt(include_calendar=True):
     date = datetime.now(pytz.timezone("Europe/Amsterdam")).strftime("%Y-%m-%d, %A")
     prompt = SYSTEM_PROMPT.format(date=date)
-    if include_calendar and os.environ.get("GOOGLE_REFRESH_TOKEN"):
+    has_token = bool(os.environ.get("GOOGLE_REFRESH_TOKEN"))
+    logger.info(f"Calendar: include={include_calendar}, has_token={has_token}")
+    if include_calendar and has_token:
         calendar = get_calendar_context()
+        logger.info(f"Calendar context: {repr(calendar[:100]) if calendar else 'empty'}")
         if calendar:
             prompt += f"\n\n## Today's Calendar\n{calendar}"
     return prompt
