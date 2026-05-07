@@ -58,6 +58,10 @@ SYSTEM_PROMPT = """You are Stef's personal executive assistant, creative thinkin
 - Remind him of the bigger picture when he's stuck in the weeds
 - Emojis are fine occasionally, don't overdo it
 
+## Calendar Access
+You have access to Stef's Google Calendar via the get_calendar_events tool.
+Use it proactively whenever questions involve scheduling, planning, or time.
+
 ## When Stef Asks for a Check-in
 - Morning: help him plan the day with clear priorities — what matters most today?
 - Evening: short reflection — what got done, what didn't, how did it feel?
@@ -70,6 +74,25 @@ SYSTEM_PROMPT = """You are Stef's personal executive assistant, creative thinkin
 
 Today's date: {date}
 """
+
+CALENDAR_TOOL = {
+    "name": "get_calendar_events",
+    "description": "Fetch events from Stef's Google Calendar for a given date range. Use this whenever Stef asks about his schedule, availability, upcoming events, or anything time-related.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "start_date": {
+                "type": "string",
+                "description": "Start date in YYYY-MM-DD format. Defaults to today if not provided."
+            },
+            "end_date": {
+                "type": "string",
+                "description": "End date in YYYY-MM-DD format (exclusive). Defaults to 7 days after start_date if not provided."
+            }
+        },
+        "required": []
+    }
+}
 
 conversation_histories = {}
 
@@ -93,13 +116,22 @@ def get_google_creds():
     return creds
 
 
-def get_calendar_context(days=2):
+def fetch_calendar_events(start_date=None, end_date=None):
     try:
-        service = build("calendar", "v3", credentials=get_google_creds(), cache_discovery=False)
         tz = pytz.timezone("Europe/Amsterdam")
         now = datetime.now(tz)
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=days)
+
+        if start_date:
+            start = datetime.fromisoformat(start_date).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=tz)
+        else:
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        if end_date:
+            end = datetime.fromisoformat(end_date).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=tz)
+        else:
+            end = start + timedelta(days=7)
+
+        service = build("calendar", "v3", credentials=get_google_creds(), cache_discovery=False)
 
         events = []
         for cal_id in CALENDAR_IDS:
@@ -116,10 +148,7 @@ def get_calendar_context(days=2):
                 pass
 
         if not events:
-            return "No events in the next 2 days."
-
-        today = start.date()
-        tomorrow = (start + timedelta(days=1)).date()
+            return "No events found for this period."
 
         events.sort(key=lambda e: e["start"].get("dateTime", e["start"].get("date", "")))
         lines = []
@@ -130,37 +159,30 @@ def get_calendar_context(days=2):
             if "T" in start_raw:
                 event_dt = datetime.fromisoformat(start_raw).astimezone(tz)
                 event_date = event_dt.date()
-                t = event_dt.strftime("%H:%M")
-                time_str = t
+                time_str = event_dt.strftime("%H:%M")
             else:
                 event_date = datetime.fromisoformat(start_raw).date()
                 time_str = "All day"
 
             if event_date != current_day:
                 current_day = event_date
-                if event_date == today:
-                    lines.append("Today:")
-                elif event_date == tomorrow:
-                    lines.append("Tomorrow:")
+                lines.append(event_date.strftime("%A %d %B"))
             lines.append(f"  - {time_str} — {title}")
+
         return "\n".join(lines)
     except Exception as e:
         import traceback
         logger.error(f"Calendar fetch failed: {e}\n{traceback.format_exc()}")
-        return ""
+        return f"Error fetching calendar: {str(e)}"
 
 
-def get_system_prompt(include_calendar=True):
+def get_system_prompt():
     date = datetime.now(pytz.timezone("Europe/Amsterdam")).strftime("%Y-%m-%d, %A")
-    prompt = SYSTEM_PROMPT.format(date=date)
-    has_token = bool(os.environ.get("GOOGLE_REFRESH_TOKEN"))
-    logger.info(f"Calendar: include={include_calendar}, has_token={has_token}")
-    if include_calendar and has_token:
-        calendar = get_calendar_context()
-        logger.info(f"Calendar context: {repr(calendar[:100]) if calendar else 'empty'}")
-        if calendar:
-            prompt += f"\n\n## Today's Calendar\n{calendar}"
-    return prompt
+    return SYSTEM_PROMPT.format(date=date)
+
+
+def has_calendar():
+    return bool(os.environ.get("GOOGLE_REFRESH_TOKEN"))
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -171,6 +193,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def run_with_tools(messages, max_tokens=1024):
+    tools = [CALENDAR_TOOL] if has_calendar() else []
+    turn_messages = list(messages)
+
+    while True:
+        response = anthropic_client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=max_tokens,
+            system=get_system_prompt(),
+            messages=turn_messages,
+            tools=tools if tools else [],
+        )
+
+        if response.stop_reason == "tool_use":
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    logger.info(f"Tool call: {block.name}({block.input})")
+                    if block.name == "get_calendar_events":
+                        result = fetch_calendar_events(
+                            block.input.get("start_date"),
+                            block.input.get("end_date"),
+                        )
+                    else:
+                        result = "Unknown tool."
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    })
+
+            turn_messages.append({"role": "assistant", "content": response.content})
+            turn_messages.append({"role": "user", "content": tool_results})
+        else:
+            reply = next((b.text for b in response.content if hasattr(b, "text")), "")
+            return reply
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_message = update.message.text
@@ -178,20 +238,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id not in conversation_histories:
         conversation_histories[chat_id] = []
 
+    messages = conversation_histories[chat_id] + [{"role": "user", "content": user_message}]
+
+    reply = await run_with_tools(messages)
+
     conversation_histories[chat_id].append({"role": "user", "content": user_message})
+    conversation_histories[chat_id].append({"role": "assistant", "content": reply})
 
     if len(conversation_histories[chat_id]) > 20:
         conversation_histories[chat_id] = conversation_histories[chat_id][-20:]
-
-    response = anthropic_client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        system=get_system_prompt(),
-        messages=conversation_histories[chat_id]
-    )
-
-    reply = response.content[0].text
-    conversation_histories[chat_id].append({"role": "assistant", "content": reply})
 
     await update.message.reply_text(reply)
 
@@ -199,80 +254,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_morning_checkin(bot):
     if not STEF_CHAT_ID:
         return
-
-    response = anthropic_client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=512,
-        system=get_system_prompt(),
-        messages=[{
-            "role": "user",
-            "content": "Send me a short morning check-in. Brief, direct — what should I keep in mind and focus on today?"
-        }]
-    )
-
-    await bot.send_message(chat_id=int(STEF_CHAT_ID), text=response.content[0].text)
+    messages = [{"role": "user", "content": "Send me a short morning check-in. Pull up today's calendar first, then give me a brief, direct plan for the day."}]
+    reply = await run_with_tools(messages, max_tokens=512)
+    await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
 
 
 async def send_evening_checkin(bot):
     if not STEF_CHAT_ID:
         return
-
-    response = anthropic_client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=512,
-        system=get_system_prompt(),
-        messages=[{
-            "role": "user",
-            "content": "Send me a short evening check-in. Brief reflection — what's worth thinking about before I wind down?"
-        }]
-    )
-
-    await bot.send_message(chat_id=int(STEF_CHAT_ID), text=response.content[0].text)
+    messages = [{"role": "user", "content": "Send me a short evening check-in. Brief reflection — what's worth thinking about before I wind down?"}]
+    reply = await run_with_tools(messages, max_tokens=512)
+    await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
 
 
 async def send_weekly_review(bot):
     if not STEF_CHAT_ID:
         return
-
-    response = anthropic_client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=768,
-        system=get_system_prompt(),
-        messages=[{
-            "role": "user",
-            "content": "It's Sunday evening — send me a short weekly review. What should I reflect on from this week, and what's the main focus for next week? Keep it tight and honest."
-        }]
-    )
-
-    await bot.send_message(chat_id=int(STEF_CHAT_ID), text=response.content[0].text)
+    messages = [{"role": "user", "content": "It's Sunday evening — send me a short weekly review. Check next week's calendar, then tell me what to reflect on from this week and what the main focus should be for next week. Keep it tight and honest."}]
+    reply = await run_with_tools(messages, max_tokens=768)
+    await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
 
 
 async def post_init(application: Application):
     if STEF_CHAT_ID:
         scheduler = AsyncIOScheduler(timezone=pytz.timezone("Europe/Amsterdam"))
-        scheduler.add_job(
-            send_morning_checkin,
-            "cron",
-            hour=7,
-            minute=0,
-            args=[application.bot]
-        )
-        scheduler.add_job(
-            send_evening_checkin,
-            "cron",
-            day_of_week="mon-sat",
-            hour=23,
-            minute=0,
-            args=[application.bot]
-        )
-        scheduler.add_job(
-            send_weekly_review,
-            "cron",
-            day_of_week="sun",
-            hour=23,
-            minute=0,
-            args=[application.bot]
-        )
+        scheduler.add_job(send_morning_checkin, "cron", hour=7, minute=0, args=[application.bot])
+        scheduler.add_job(send_evening_checkin, "cron", day_of_week="mon-sat", hour=23, minute=0, args=[application.bot])
+        scheduler.add_job(send_weekly_review, "cron", day_of_week="sun", hour=23, minute=0, args=[application.bot])
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
         logger.info("Scheduled: morning 07:00, evening 23:00 (Mon-Sat), weekly review 23:00 (Sun)")
