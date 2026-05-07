@@ -93,7 +93,7 @@ def get_google_creds():
     return creds
 
 
-def get_calendar_context(days=1):
+def get_calendar_context(days=2):
     try:
         service = build("calendar", "v3", credentials=get_google_creds(), cache_discovery=False)
         tz = pytz.timezone("Europe/Amsterdam")
@@ -116,18 +116,33 @@ def get_calendar_context(days=1):
                 pass
 
         if not events:
-            return "No events scheduled today."
+            return "No events in the next 2 days."
+
+        today = start.date()
+        tomorrow = (start + timedelta(days=1)).date()
 
         events.sort(key=lambda e: e["start"].get("dateTime", e["start"].get("date", "")))
         lines = []
+        current_day = None
         for e in events:
             title = e.get("summary", "Untitled")
             start_raw = e["start"].get("dateTime", e["start"].get("date", ""))
             if "T" in start_raw:
-                t = datetime.fromisoformat(start_raw).astimezone(tz).strftime("%H:%M")
-                lines.append(f"- {t} — {title}")
+                event_dt = datetime.fromisoformat(start_raw).astimezone(tz)
+                event_date = event_dt.date()
+                t = event_dt.strftime("%H:%M")
+                time_str = t
             else:
-                lines.append(f"- All day — {title}")
+                event_date = datetime.fromisoformat(start_raw).date()
+                time_str = "All day"
+
+            if event_date != current_day:
+                current_day = event_date
+                if event_date == today:
+                    lines.append("Today:")
+                elif event_date == tomorrow:
+                    lines.append("Tomorrow:")
+            lines.append(f"  - {time_str} — {title}")
         return "\n".join(lines)
     except Exception as e:
         import traceback
