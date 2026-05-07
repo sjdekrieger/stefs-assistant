@@ -22,33 +22,19 @@ STEF_CHAT_ID = os.environ.get("STEF_CHAT_ID")
 
 anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
-SYSTEM_PROMPT = """You are Stef's personal executive assistant, creative thinking partner, and lifestyle coach — running as a Telegram bot on his phone.
+SYSTEM_PROMPT_TEMPLATE = """You are Stef's personal executive assistant, creative thinking partner, and lifestyle coach — running as a Telegram bot on his phone.
 
-## Who You're Talking To
-- Name: Stef de Krieger
-- 2nd year Product Design student in Amsterdam (Hogeschool van Amsterdam)
-- Builds 3D product renders and visual concepts using SolidWorks, Blender, and Figma
-- Works part-time as a waiter for income while studying
-- Building Tenciq — a creative design brand and online presence (Instagram)
-- In a relationship with Ebba
-- Values: creativity, discipline, consistency, personal growth, real experiences
+## About Stef
+{me}
 
-## Current Priorities (Q2 2026)
-1. Finish second year of school — no delays, this is the most time-sensitive thing
-2. Build the portfolio — consistently producing and publishing Blender/product renders
-3. Grow Tenciq — posting regularly, developing the brand
-4. Earn first design income — €1000 goal for 2026 (3D modeling commissions, renders, technical drawings)
-5. Build better daily systems — focus, phone usage, sports routine, sleep
+## Work & Business
+{work}
 
-## 2026 Goals
-- Earn first €1000 through design work
-- Finish second year of Product Design on time
-- Build a portfolio strong enough for internships or real opportunities
-- Level up Blender and AI-assisted rendering skills significantly
-- Lower daily screen time to max 3 hours
-- Build a sustainable sports routine (running + gym)
-- Read 6 books this year
-- Keep making time for Ebba, friends, and fun
+## Current Priorities
+{priorities}
+
+## Goals
+{goals}
 
 ## How to Communicate
 - Casual, direct, and motivating — like a smart friend who's also a coach, not a business assistant
@@ -80,6 +66,16 @@ These are sent automatically by the system. If Stef asks about them, confirm the
 
 Today's date: {date}
 """
+
+
+def load_context(filename):
+    for path in [f"../context/{filename}", f"./context/{filename}"]:
+        try:
+            with open(path, "r") as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            continue
+    return ""
 
 CALENDAR_TOOL = {
     "name": "get_calendar_events",
@@ -184,7 +180,13 @@ def fetch_calendar_events(start_date=None, end_date=None):
 
 def get_system_prompt():
     date = datetime.now(pytz.timezone("Europe/Amsterdam")).strftime("%Y-%m-%d, %A")
-    return SYSTEM_PROMPT.format(date=date)
+    return SYSTEM_PROMPT_TEMPLATE.format(
+        me=load_context("me.md"),
+        work=load_context("work.md"),
+        priorities=load_context("current-priorities.md"),
+        goals=load_context("goals.md"),
+        date=date,
+    )
 
 
 def has_calendar():
@@ -202,6 +204,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def test_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Sending a test morning check-in...")
     messages = [{"role": "user", "content": "Send me a short morning check-in. Pull up today's calendar first, then give me a brief, direct plan for the day."}]
+    reply = await run_with_tools(messages, max_tokens=512)
+    await update.message.reply_text(reply)
+
+
+async def evening_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Sending evening check-in...")
+    messages = [{"role": "user", "content": "Send me a short evening check-in. Brief reflection — what's worth thinking about before I wind down?"}]
     reply = await run_with_tools(messages, max_tokens=512)
     await update.message.reply_text(reply)
 
@@ -318,6 +327,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("test", test_checkin))
+    app.add_handler(CommandHandler("evening", evening_checkin))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Bot starting...")
