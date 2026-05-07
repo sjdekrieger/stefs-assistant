@@ -1,9 +1,11 @@
 import os
 import logging
+import asyncio
 from anthropic import Anthropic
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import psycopg2
 import pytz
 from datetime import datetime, timedelta
 from google.oauth2.credentials import Credentials
@@ -19,6 +21,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 STEF_CHAT_ID = os.environ.get("STEF_CHAT_ID")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -36,6 +39,9 @@ SYSTEM_PROMPT_TEMPLATE = """You are Stef's personal executive assistant, creativ
 ## Goals
 {goals}
 
+## What You Remember
+{memories}
+
 ## How to Communicate
 - Casual, direct, and motivating — like a smart friend who's also a coach, not a business assistant
 - Concise by default — bullet points and structure over walls of text
@@ -44,9 +50,10 @@ SYSTEM_PROMPT_TEMPLATE = """You are Stef's personal executive assistant, creativ
 - Remind him of the bigger picture when he's stuck in the weeds
 - Emojis are fine occasionally, don't overdo it
 
-## Calendar Access
-You have access to Stef's Google Calendar via the get_calendar_events tool.
-Use it proactively whenever questions involve scheduling, planning, or time.
+## Tools You Have
+- **get_calendar_events**: Read Stef's Google Calendar for any date range — use proactively for planning
+- **save_memory**: Persistently remember something across all future conversations — use this proactively when Stef shares something important (preferences, decisions, personal details, recurring patterns). Don't wait to be asked.
+- **update_context**: Update Stef's current priorities or goals directly — use when he explicitly asks to update them
 
 ## Proactive Messages
 You are set up to send Stef automatic messages:
@@ -68,7 +75,140 @@ Today's date: {date}
 """
 
 
+# --- Database ---
+
+def _db_connect():
+    url = DATABASE_URL
+    if url and url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    return psycopg2.connect(url)
+
+
+def init_db():
+    if not DATABASE_URL:
+        logger.info("DATABASE_URL not set — running without persistence")
+        return
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_history (
+                    id SERIAL PRIMARY KEY,
+                    chat_id BIGINT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS memories (
+                    id SERIAL PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS context_store (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+        conn.commit()
+        logger.info("DB initialized")
+    finally:
+        conn.close()
+
+
+def db_load_history(chat_id, limit=30):
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT role, content FROM (
+                    SELECT role, content, created_at FROM conversation_history
+                    WHERE chat_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                ) sub ORDER BY created_at ASC
+            """, (chat_id, limit))
+            return [{"role": row[0], "content": row[1]} for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def db_save_message(chat_id, role, content):
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO conversation_history (chat_id, role, content) VALUES (%s, %s, %s)",
+                (chat_id, role, content)
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_save_memory(content):
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO memories (content) VALUES (%s)", (content,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_load_memories():
+    if not DATABASE_URL:
+        return []
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT content FROM memories ORDER BY created_at")
+            return [row[0] for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def db_update_context(key, value):
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO context_store (key, value, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+            """, (key, value))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_load_context_override(key):
+    if not DATABASE_URL:
+        return None
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM context_store WHERE key = %s", (key,))
+            row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+# --- In-memory fallback for conversation history ---
+conversation_histories = {}
+
+
+# --- Context loading ---
+
 def load_context(filename):
+    override = db_load_context_override(filename)
+    if override is not None:
+        return override
     for path in [f"../context/{filename}", f"./context/{filename}"]:
         try:
             with open(path, "r") as f:
@@ -77,32 +217,32 @@ def load_context(filename):
             continue
     return ""
 
-CALENDAR_TOOL = {
-    "name": "get_calendar_events",
-    "description": "Fetch events from Stef's Google Calendar for a given date range. Use this whenever Stef asks about his schedule, availability, upcoming events, or anything time-related.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "start_date": {
-                "type": "string",
-                "description": "Start date in YYYY-MM-DD format. Defaults to today if not provided."
-            },
-            "end_date": {
-                "type": "string",
-                "description": "End date in YYYY-MM-DD format (exclusive). Defaults to 7 days after start_date if not provided."
-            }
-        },
-        "required": []
-    }
-}
 
-conversation_histories = {}
+def get_system_prompt():
+    date = datetime.now(pytz.timezone("Europe/Amsterdam")).strftime("%Y-%m-%d, %A")
+    memories = db_load_memories()
+    memory_section = "\n".join(f"- {m}" for m in memories) if memories else "None saved yet."
+    return SYSTEM_PROMPT_TEMPLATE.format(
+        me=load_context("me.md"),
+        work=load_context("work.md"),
+        priorities=load_context("current-priorities.md"),
+        goals=load_context("goals.md"),
+        memories=memory_section,
+        date=date,
+    )
+
+
+# --- Google Calendar ---
 
 CALENDAR_IDS = [
     "sjdekrieger@gmail.com",
     "cgocm6sga6ms54gfehs5plhl0r0th7e1@import.calendar.google.com",
     "imj5l9oo6882eb8sqikef7bcrs@group.calendar.google.com",
 ]
+
+
+def has_calendar():
+    return bool(os.environ.get("GOOGLE_REFRESH_TOKEN"))
 
 
 def get_google_creds():
@@ -178,19 +318,127 @@ def fetch_calendar_events(start_date=None, end_date=None):
         return f"Error fetching calendar: {str(e)}"
 
 
-def get_system_prompt():
-    date = datetime.now(pytz.timezone("Europe/Amsterdam")).strftime("%Y-%m-%d, %A")
-    return SYSTEM_PROMPT_TEMPLATE.format(
-        me=load_context("me.md"),
-        work=load_context("work.md"),
-        priorities=load_context("current-priorities.md"),
-        goals=load_context("goals.md"),
-        date=date,
-    )
+# --- Tools ---
+
+CALENDAR_TOOL = {
+    "name": "get_calendar_events",
+    "description": "Fetch events from Stef's Google Calendar for a given date range. Use proactively whenever Stef asks about his schedule, upcoming plans, or anything time-related.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "start_date": {"type": "string", "description": "Start date YYYY-MM-DD. Defaults to today."},
+            "end_date": {"type": "string", "description": "End date YYYY-MM-DD (exclusive). Defaults to 7 days after start."}
+        },
+        "required": []
+    }
+}
+
+SAVE_MEMORY_TOOL = {
+    "name": "save_memory",
+    "description": "Save a piece of information to persistent memory. This persists across all future conversations and restarts. Use proactively when Stef shares something important — preferences, decisions, personal facts, recurring patterns. Don't wait to be asked.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string", "description": "What to remember. Be specific and include context — e.g. 'Stef prefers short bullet responses over long paragraphs' rather than just 'prefers bullets'."}
+        },
+        "required": ["content"]
+    }
+}
+
+UPDATE_CONTEXT_TOOL = {
+    "name": "update_context",
+    "description": "Update one of Stef's context sections — his current priorities or goals. Use when he explicitly asks to change them. The new content replaces the existing section.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "section": {
+                "type": "string",
+                "enum": ["current-priorities", "goals"],
+                "description": "Which section to update"
+            },
+            "content": {"type": "string", "description": "The full new content for this section"}
+        },
+        "required": ["section", "content"]
+    }
+}
 
 
-def has_calendar():
-    return bool(os.environ.get("GOOGLE_REFRESH_TOKEN"))
+async def run_with_tools(messages, max_tokens=1024):
+    tools = []
+    if has_calendar():
+        tools.append(CALENDAR_TOOL)
+    if DATABASE_URL:
+        tools.extend([SAVE_MEMORY_TOOL, UPDATE_CONTEXT_TOOL])
+
+    turn_messages = list(messages)
+    loop = asyncio.get_running_loop()
+
+    while True:
+        response = anthropic_client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=max_tokens,
+            system=get_system_prompt(),
+            messages=turn_messages,
+            tools=tools if tools else [],
+        )
+
+        if response.stop_reason == "tool_use":
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    logger.info(f"Tool call: {block.name}({block.input})")
+                    if block.name == "get_calendar_events":
+                        result = fetch_calendar_events(
+                            block.input.get("start_date"),
+                            block.input.get("end_date"),
+                        )
+                    elif block.name == "save_memory":
+                        await loop.run_in_executor(None, db_save_memory, block.input["content"])
+                        result = f"Saved to memory: {block.input['content']}"
+                    elif block.name == "update_context":
+                        await loop.run_in_executor(
+                            None, db_update_context, block.input["section"], block.input["content"]
+                        )
+                        result = f"Updated {block.input['section']}."
+                    else:
+                        result = "Unknown tool."
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    })
+
+            turn_messages.append({"role": "assistant", "content": response.content})
+            turn_messages.append({"role": "user", "content": tool_results})
+        else:
+            return next((b.text for b in response.content if hasattr(b, "text")), "")
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_message = update.message.text
+    loop = asyncio.get_running_loop()
+
+    if DATABASE_URL:
+        history = await loop.run_in_executor(None, db_load_history, chat_id)
+        messages = history + [{"role": "user", "content": user_message}]
+    else:
+        if chat_id not in conversation_histories:
+            conversation_histories[chat_id] = []
+        messages = conversation_histories[chat_id] + [{"role": "user", "content": user_message}]
+
+    reply = await run_with_tools(messages)
+
+    if DATABASE_URL:
+        await loop.run_in_executor(None, db_save_message, chat_id, "user", user_message)
+        await loop.run_in_executor(None, db_save_message, chat_id, "assistant", reply)
+    else:
+        conversation_histories[chat_id].append({"role": "user", "content": user_message})
+        conversation_histories[chat_id].append({"role": "assistant", "content": reply})
+        if len(conversation_histories[chat_id]) > 20:
+            conversation_histories[chat_id] = conversation_histories[chat_id][-20:]
+
+    await update.message.reply_text(reply)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -212,64 +460,6 @@ async def evening_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Sending evening check-in...")
     messages = [{"role": "user", "content": "Send me a short evening check-in. Brief reflection — what's worth thinking about before I wind down?"}]
     reply = await run_with_tools(messages, max_tokens=512)
-    await update.message.reply_text(reply)
-
-
-async def run_with_tools(messages, max_tokens=1024):
-    tools = [CALENDAR_TOOL] if has_calendar() else []
-    turn_messages = list(messages)
-
-    while True:
-        response = anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=max_tokens,
-            system=get_system_prompt(),
-            messages=turn_messages,
-            tools=tools if tools else [],
-        )
-
-        if response.stop_reason == "tool_use":
-            tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    logger.info(f"Tool call: {block.name}({block.input})")
-                    if block.name == "get_calendar_events":
-                        result = fetch_calendar_events(
-                            block.input.get("start_date"),
-                            block.input.get("end_date"),
-                        )
-                    else:
-                        result = "Unknown tool."
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result,
-                    })
-
-            turn_messages.append({"role": "assistant", "content": response.content})
-            turn_messages.append({"role": "user", "content": tool_results})
-        else:
-            reply = next((b.text for b in response.content if hasattr(b, "text")), "")
-            return reply
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_message = update.message.text
-
-    if chat_id not in conversation_histories:
-        conversation_histories[chat_id] = []
-
-    messages = conversation_histories[chat_id] + [{"role": "user", "content": user_message}]
-
-    reply = await run_with_tools(messages)
-
-    conversation_histories[chat_id].append({"role": "user", "content": user_message})
-    conversation_histories[chat_id].append({"role": "assistant", "content": reply})
-
-    if len(conversation_histories[chat_id]) > 20:
-        conversation_histories[chat_id] = conversation_histories[chat_id][-20:]
-
     await update.message.reply_text(reply)
 
 
@@ -298,6 +488,7 @@ async def send_weekly_review(bot):
 
 
 async def post_init(application: Application):
+    init_db()
     if STEF_CHAT_ID:
         scheduler = AsyncIOScheduler(timezone=pytz.timezone("Europe/Amsterdam"))
         scheduler.add_job(send_morning_checkin, "cron", hour=7, minute=0, args=[application.bot])
