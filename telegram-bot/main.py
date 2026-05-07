@@ -130,7 +130,8 @@ def get_calendar_context(days=1):
                 lines.append(f"- All day — {title}")
         return "\n".join(lines)
     except Exception as e:
-        logger.warning(f"Calendar fetch failed: {e}")
+        import traceback
+        logger.error(f"Calendar fetch failed: {e}\n{traceback.format_exc()}")
         return ""
 
 
