@@ -199,6 +199,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def test_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Sending a test morning check-in...")
+    messages = [{"role": "user", "content": "Send me a short morning check-in. Pull up today's calendar first, then give me a brief, direct plan for the day."}]
+    reply = await run_with_tools(messages, max_tokens=512)
+    await update.message.reply_text(reply)
+
+
 async def run_with_tools(messages, max_tokens=1024):
     tools = [CALENDAR_TOOL] if has_calendar() else []
     turn_messages = list(messages)
@@ -310,6 +317,7 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("test", test_checkin))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Bot starting...")
