@@ -256,7 +256,7 @@ def get_google_creds():
         client_id=os.environ.get("GOOGLE_CLIENT_ID"),
         client_secret=os.environ.get("GOOGLE_CLIENT_SECRET"),
         token_uri="https://oauth2.googleapis.com/token",
-        scopes=["https://www.googleapis.com/auth/calendar.readonly"],
+        scopes=["https://www.googleapis.com/auth/calendar"],
     )
     creds.refresh(Request())
     return creds
@@ -324,6 +324,39 @@ def fetch_calendar_events(start_date=None, end_date=None):
 
 # --- Tools ---
 
+def create_calendar_event(title, date, start_time=None, end_time=None, description=None):
+    try:
+        tz = pytz.timezone("Europe/Amsterdam")
+        service = build("calendar", "v3", credentials=get_google_creds(), cache_discovery=False)
+
+        if start_time:
+            start_dt = datetime.fromisoformat(f"{date}T{start_time}").replace(tzinfo=tz)
+            if end_time:
+                end_dt = datetime.fromisoformat(f"{date}T{end_time}").replace(tzinfo=tz)
+            else:
+                end_dt = start_dt + timedelta(hours=1)
+            body = {
+                "summary": title,
+                "start": {"dateTime": start_dt.isoformat(), "timeZone": "Europe/Amsterdam"},
+                "end": {"dateTime": end_dt.isoformat(), "timeZone": "Europe/Amsterdam"},
+            }
+        else:
+            body = {
+                "summary": title,
+                "start": {"date": date},
+                "end": {"date": date},
+            }
+
+        if description:
+            body["description"] = description
+
+        event = service.events().insert(calendarId="primary", body=body).execute()
+        return f"Event created: {event.get('summary')} on {date}"
+    except Exception as e:
+        logger.error(f"Create event failed: {e}")
+        return f"Failed to create event: {str(e)}"
+
+
 CALENDAR_TOOL = {
     "name": "get_calendar_events",
     "description": "Fetch events from Stef's Google Calendar for a given date range. Use proactively whenever Stef asks about his schedule, upcoming plans, or anything time-related.",
@@ -334,6 +367,22 @@ CALENDAR_TOOL = {
             "end_date": {"type": "string", "description": "End date YYYY-MM-DD (exclusive). Defaults to 7 days after start."}
         },
         "required": []
+    }
+}
+
+CREATE_EVENT_TOOL = {
+    "name": "create_calendar_event",
+    "description": "Create an event in Stef's Google Calendar. Use when he asks to add, schedule, or plan something at a specific time or date.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "Event title"},
+            "date": {"type": "string", "description": "Date in YYYY-MM-DD format"},
+            "start_time": {"type": "string", "description": "Start time in HH:MM format (24h). Omit for all-day events."},
+            "end_time": {"type": "string", "description": "End time in HH:MM format (24h). Defaults to 1 hour after start."},
+            "description": {"type": "string", "description": "Optional event description or notes."}
+        },
+        "required": ["title", "date"]
     }
 }
 
@@ -371,6 +420,7 @@ async def run_with_tools(messages, max_tokens=1024):
     tools = []
     if has_calendar():
         tools.append(CALENDAR_TOOL)
+        tools.append(CREATE_EVENT_TOOL)
     if DATABASE_URL:
         tools.extend([SAVE_MEMORY_TOOL, UPDATE_CONTEXT_TOOL])
 
@@ -395,6 +445,14 @@ async def run_with_tools(messages, max_tokens=1024):
                         result = fetch_calendar_events(
                             block.input.get("start_date"),
                             block.input.get("end_date"),
+                        )
+                    elif block.name == "create_calendar_event":
+                        result = create_calendar_event(
+                            block.input["title"],
+                            block.input["date"],
+                            block.input.get("start_time"),
+                            block.input.get("end_time"),
+                            block.input.get("description"),
                         )
                     elif block.name == "save_memory":
                         await loop.run_in_executor(None, db_save_memory, block.input["content"])
