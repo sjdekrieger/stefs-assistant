@@ -249,6 +249,27 @@ def has_calendar():
     return bool(os.environ.get("GOOGLE_REFRESH_TOKEN"))
 
 
+def has_search():
+    return bool(os.environ.get("TAVILY_API_KEY"))
+
+
+def search_web(query):
+    try:
+        from tavily import TavilyClient
+        client = TavilyClient(api_key=os.environ.get("TAVILY_API_KEY"))
+        response = client.search(query=query, max_results=5)
+        results = response.get("results", [])
+        if not results:
+            return "No results found."
+        lines = []
+        for r in results:
+            lines.append(f"**{r['title']}**\n{r['content']}\nSource: {r['url']}")
+        return "\n\n".join(lines)
+    except Exception as e:
+        logger.error(f"Web search failed: {e}")
+        return f"Search failed: {str(e)}"
+
+
 def get_google_creds():
     creds = Credentials(
         token=None,
@@ -386,6 +407,18 @@ CREATE_EVENT_TOOL = {
     }
 }
 
+SEARCH_TOOL = {
+    "name": "search_web",
+    "description": "Search the internet for current information. Use when Stef asks about anything that requires up-to-date knowledge — news, prices, research, how-to guides, people, companies, events, or anything you're not certain about.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "The search query"}
+        },
+        "required": ["query"]
+    }
+}
+
 SAVE_MEMORY_TOOL = {
     "name": "save_memory",
     "description": "Save a piece of information to persistent memory. This persists across all future conversations and restarts. Use proactively when Stef shares something important — preferences, decisions, personal facts, recurring patterns. Don't wait to be asked.",
@@ -421,6 +454,8 @@ async def run_with_tools(messages, max_tokens=1024):
     if has_calendar():
         tools.append(CALENDAR_TOOL)
         tools.append(CREATE_EVENT_TOOL)
+    if has_search():
+        tools.append(SEARCH_TOOL)
     if DATABASE_URL:
         tools.extend([SAVE_MEMORY_TOOL, UPDATE_CONTEXT_TOOL])
 
@@ -446,6 +481,8 @@ async def run_with_tools(messages, max_tokens=1024):
                             block.input.get("start_date"),
                             block.input.get("end_date"),
                         )
+                    elif block.name == "search_web":
+                        result = await loop.run_in_executor(None, search_web, block.input["query"])
                     elif block.name == "create_calendar_event":
                         result = create_calendar_event(
                             block.input["title"],
