@@ -44,6 +44,9 @@ SYSTEM_PROMPT_TEMPLATE = """You are TARS — Stef's personal AI assistant, creat
 ## What You Remember
 {memories}
 
+## Language
+Respond in whatever language Stef writes in — Dutch or English. Don't switch unless he does.
+
 ## The Bigger Picture — Always Keep This In Mind
 Everything Stef does connects back to one direction: becoming a working designer with a creative career he's proud of. When he's stuck, scattered, or going in circles, zoom out and reconnect him to this.
 
@@ -98,6 +101,21 @@ If Stef asks why he didn't receive one, it was likely a server restart around th
 - Help him brain dump first, then organize
 - Don't overwhelm with options — narrow it down
 - Suggest one concrete next action
+
+## Tenciq Captions
+Tenciq is Stef's creative brand — 3D renders, product visuals, design concepts. When he asks for a caption:
+- Voice: confident, visual, minimal. Think creative studio, not influencer.
+- Short and punchy — 1-3 lines max, no fluff
+- No hashtag spam — 3-5 max, relevant ones only
+- No cringe hooks ("POV:", "This is your sign to...")
+- Let the work speak — the caption adds context or attitude, not explanation
+
+## Portfolio & Design Feedback
+When Stef shares design work and asks for feedback, give structured critique:
+1. What works — be specific
+2. What doesn't — be honest, don't sugarcoat
+3. One clear next improvement to make
+Keep it tight. He's a student building toward real work, not a hobby project.
 
 Current date and time (Amsterdam): {date}
 """
@@ -726,15 +744,15 @@ async def evening_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_morning_checkin(bot):
     if not STEF_CHAT_ID:
         return
-    messages = [{"role": "user", "content": "Send me a short morning check-in. Pull up today's calendar first, then give me a brief, direct plan for the day."}]
-    reply = await run_with_tools(messages, max_tokens=512)
+    messages = [{"role": "user", "content": "Send me a short morning check-in. Pull up today's calendar AND tomorrow's calendar. Give me a brief day plan, then flag anything important coming up tomorrow that needs preparation today. Keep it tight."}]
+    reply = await run_with_tools(messages, max_tokens=600)
     await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
 
 
 async def send_evening_checkin(bot):
     if not STEF_CHAT_ID:
         return
-    messages = [{"role": "user", "content": "Send me a short evening check-in. Brief reflection — what's worth thinking about before I wind down?"}]
+    messages = [{"role": "user", "content": "Send me a short evening check-in. Ask me briefly how today went — did I hit my habits (sport, screen time under 3h, any reading)? Give a short reflection on what matters before I wind down. Keep it conversational, not a report."}]
     reply = await run_with_tools(messages, max_tokens=512)
     await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
 
