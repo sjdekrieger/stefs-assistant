@@ -185,6 +185,17 @@ def init_db():
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS deadlines (
+                    id SERIAL PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    due_date DATE NOT NULL,
+                    notes TEXT,
+                    reminded_1week BOOLEAN DEFAULT FALSE,
+                    reminded_1day BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
         conn.commit()
         logger.info("DB initialized")
     finally:
@@ -284,6 +295,64 @@ def db_set_reminder(message, remind_at_str):
         logger.info(f"Reminder set: '{message}' at {remind_at}")
     finally:
         conn.close()
+
+
+def db_add_deadline(title, due_date, notes=None):
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO deadlines (title, due_date, notes) VALUES (%s, %s, %s)",
+                (title, due_date, notes)
+            )
+        conn.commit()
+        logger.info(f"Deadline added: '{title}' on {due_date}")
+    finally:
+        conn.close()
+
+
+async def check_deadlines(bot):
+    if not DATABASE_URL or not STEF_CHAT_ID:
+        return
+    try:
+        tz = pytz.timezone("Europe/Amsterdam")
+        today = datetime.now(tz).date()
+        conn = _db_connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, title, due_date, notes FROM deadlines WHERE due_date = %s AND reminded_1week = FALSE",
+                    (today + timedelta(days=7),)
+                )
+                for id_, title, due_date, notes in cur.fetchall():
+                    msg = f"⏰ *Deadline in 1 week:* {title} — {due_date}"
+                    if notes:
+                        msg += f"\n_{notes}_"
+                    try:
+                        await bot.send_message(chat_id=int(STEF_CHAT_ID), text=msg, parse_mode="Markdown")
+                    except Exception:
+                        await bot.send_message(chat_id=int(STEF_CHAT_ID), text=msg)
+                    cur.execute("UPDATE deadlines SET reminded_1week = TRUE WHERE id = %s", (id_,))
+
+                cur.execute(
+                    "SELECT id, title, due_date, notes FROM deadlines WHERE due_date = %s AND reminded_1day = FALSE",
+                    (today + timedelta(days=1),)
+                )
+                for id_, title, due_date, notes in cur.fetchall():
+                    msg = f"🚨 *Deadline TOMORROW:* {title}"
+                    if notes:
+                        msg += f"\n_{notes}_"
+                    try:
+                        await bot.send_message(chat_id=int(STEF_CHAT_ID), text=msg, parse_mode="Markdown")
+                    except Exception:
+                        await bot.send_message(chat_id=int(STEF_CHAT_ID), text=msg)
+                    cur.execute("UPDATE deadlines SET reminded_1day = TRUE WHERE id = %s", (id_,))
+
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"check_deadlines failed: {e}")
 
 
 async def check_reminders(bot):
@@ -545,9 +614,23 @@ REMINDER_TOOL = {
     }
 }
 
+ADD_DEADLINE_TOOL = {
+    "name": "add_deadline",
+    "description": "Save a school deadline or important due date. TARS will automatically remind Stef 1 week and 1 day before. Use when Stef mentions any deadline, assignment, exam, or submission.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "What the deadline is for"},
+            "due_date": {"type": "string", "description": "Due date in YYYY-MM-DD format"},
+            "notes": {"type": "string", "description": "Optional extra context or requirements"}
+        },
+        "required": ["title", "due_date"]
+    }
+}
+
 SAVE_MEMORY_TOOL = {
     "name": "save_memory",
-    "description": "Save a piece of information to persistent memory. This persists across all future conversations and restarts. Use proactively when Stef shares something important — preferences, decisions, personal facts, recurring patterns. Don't wait to be asked.",
+    "description": "Save a piece of information to persistent memory. Use this after EVERY conversation where Stef shares something worth remembering — preferences, opinions, decisions, personal facts, things he likes/dislikes, patterns you notice. Be aggressive about this. It's better to save too much than too little.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -583,7 +666,7 @@ async def run_with_tools(messages, max_tokens=1024):
     if has_search():
         tools.append(SEARCH_TOOL)
     if DATABASE_URL:
-        tools.extend([SAVE_MEMORY_TOOL, UPDATE_CONTEXT_TOOL, REMINDER_TOOL])
+        tools.extend([SAVE_MEMORY_TOOL, UPDATE_CONTEXT_TOOL, REMINDER_TOOL, ADD_DEADLINE_TOOL])
 
     turn_messages = list(messages)
     loop = asyncio.get_running_loop()
@@ -617,6 +700,13 @@ async def run_with_tools(messages, max_tokens=1024):
                             block.input.get("end_time"),
                             block.input.get("description"),
                         )
+                    elif block.name == "add_deadline":
+                        await loop.run_in_executor(
+                            None, db_add_deadline,
+                            block.input["title"], block.input["due_date"],
+                            block.input.get("notes")
+                        )
+                        result = f"Deadline saved: {block.input['title']} on {block.input['due_date']}. I'll remind you 1 week and 1 day before."
                     elif block.name == "set_reminder":
                         await loop.run_in_executor(
                             None, db_set_reminder, block.input["message"], block.input["remind_at"]
@@ -749,6 +839,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def show_priorities(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    priorities = load_context("current-priorities.md")
+    text = f"*Your current priorities:*\n\n{priorities}\n\n_Tell me to update them anytime._"
+    try:
+        await update.message.reply_text(text, parse_mode="Markdown")
+    except Exception:
+        await update.message.reply_text(text)
+
+
 async def test_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Sending a test morning check-in...")
     messages = [{"role": "user", "content": "Send me a short morning check-in. Pull up today's calendar first, then give me a brief, direct plan for the day."}]
@@ -804,6 +903,7 @@ async def post_init(application: Application):
         scheduler.add_job(send_evening_checkin, "cron", day_of_week="mon-sat", hour=23, minute=0, args=[application.bot])
         scheduler.add_job(send_weekly_review, "cron", day_of_week="sun", hour=23, minute=0, args=[application.bot])
         scheduler.add_job(check_reminders, "interval", minutes=1, args=[application.bot])
+        scheduler.add_job(check_deadlines, "cron", hour=8, minute=0, args=[application.bot])
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
         logger.info("Scheduled: morning 07:00, evening 23:00 (Mon-Sat), weekly review 23:00 (Sun)")
@@ -829,6 +929,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("test", test_checkin))
     app.add_handler(CommandHandler("evening", evening_checkin))
+    app.add_handler(CommandHandler("priorities", show_priorities))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
