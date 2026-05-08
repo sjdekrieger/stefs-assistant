@@ -290,8 +290,8 @@ def fetch_calendar_events(start_date=None, end_date=None):
                     orderBy="startTime",
                 ).execute()
                 events.extend(result.get("items", []))
-            except Exception:
-                pass
+            except Exception as cal_err:
+                logger.error(f"Calendar {cal_id} failed: {cal_err}")
 
         if not events:
             return "No events found for this period."
