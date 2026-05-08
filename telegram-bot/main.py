@@ -98,7 +98,7 @@ If Stef asks why he didn't receive one, it was likely a server restart around th
 - Don't overwhelm with options — narrow it down
 - Suggest one concrete next action
 
-Today's date: {date}
+Current date and time (Amsterdam): {date}
 """
 
 
@@ -291,7 +291,7 @@ def load_context(filename):
 
 
 def get_system_prompt():
-    date = datetime.now(pytz.timezone("Europe/Amsterdam")).strftime("%Y-%m-%d, %A")
+    date = datetime.now(pytz.timezone("Europe/Amsterdam")).strftime("%Y-%m-%d, %A %H:%M")
     memories = db_load_memories()
     memory_section = "\n".join(f"- {m}" for m in memories) if memories else "None saved yet."
     return SYSTEM_PROMPT_TEMPLATE.format(
