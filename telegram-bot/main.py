@@ -1,4 +1,6 @@
 import os
+import io
+import base64
 import logging
 import asyncio
 from anthropic import Anthropic
@@ -139,6 +141,15 @@ def init_db():
                     updated_at TIMESTAMP DEFAULT NOW()
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id SERIAL PRIMARY KEY,
+                    message TEXT NOT NULL,
+                    remind_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    sent BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
         conn.commit()
         logger.info("DB initialized")
     finally:
@@ -224,6 +235,42 @@ def db_load_context_override(key):
         conn.close()
 
 
+def db_set_reminder(message, remind_at_str):
+    tz = pytz.timezone("Europe/Amsterdam")
+    remind_at = datetime.strptime(remind_at_str, "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO reminders (message, remind_at) VALUES (%s, %s)",
+                (message, remind_at)
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def check_reminders(bot):
+    if not DATABASE_URL or not STEF_CHAT_ID:
+        return
+    tz = pytz.timezone("Europe/Amsterdam")
+    now = datetime.now(tz)
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, message FROM reminders WHERE remind_at <= %s AND sent = FALSE",
+                (now,)
+            )
+            due = cur.fetchall()
+            for reminder_id, message in due:
+                await bot.send_message(chat_id=int(STEF_CHAT_ID), text=f"Reminder: {message}")
+                cur.execute("UPDATE reminders SET sent = TRUE WHERE id = %s", (reminder_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # --- In-memory fallback for conversation history ---
 conversation_histories = {}
 
@@ -272,6 +319,10 @@ def has_calendar():
 
 def has_search():
     return bool(os.environ.get("TAVILY_API_KEY"))
+
+
+def has_openai():
+    return bool(os.environ.get("OPENAI_API_KEY"))
 
 
 def search_web(query):
@@ -440,6 +491,19 @@ SEARCH_TOOL = {
     }
 }
 
+REMINDER_TOOL = {
+    "name": "set_reminder",
+    "description": "Set a reminder for Stef. The bot will send him a message at the specified time. Use when he asks to be reminded of something.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "message": {"type": "string", "description": "The reminder message to send"},
+            "remind_at": {"type": "string", "description": "When to send it in YYYY-MM-DD HH:MM format (Amsterdam time)"}
+        },
+        "required": ["message", "remind_at"]
+    }
+}
+
 SAVE_MEMORY_TOOL = {
     "name": "save_memory",
     "description": "Save a piece of information to persistent memory. This persists across all future conversations and restarts. Use proactively when Stef shares something important — preferences, decisions, personal facts, recurring patterns. Don't wait to be asked.",
@@ -478,7 +542,7 @@ async def run_with_tools(messages, max_tokens=1024):
     if has_search():
         tools.append(SEARCH_TOOL)
     if DATABASE_URL:
-        tools.extend([SAVE_MEMORY_TOOL, UPDATE_CONTEXT_TOOL])
+        tools.extend([SAVE_MEMORY_TOOL, UPDATE_CONTEXT_TOOL, REMINDER_TOOL])
 
     turn_messages = list(messages)
     loop = asyncio.get_running_loop()
@@ -512,6 +576,11 @@ async def run_with_tools(messages, max_tokens=1024):
                             block.input.get("end_time"),
                             block.input.get("description"),
                         )
+                    elif block.name == "set_reminder":
+                        await loop.run_in_executor(
+                            None, db_set_reminder, block.input["message"], block.input["remind_at"]
+                        )
+                        result = f"Reminder set for {block.input['remind_at']}: {block.input['message']}"
                     elif block.name == "save_memory":
                         await loop.run_in_executor(None, db_save_memory, block.input["content"])
                         result = f"Saved to memory: {block.input['content']}"
@@ -534,9 +603,7 @@ async def run_with_tools(messages, max_tokens=1024):
             return next((b.text for b in response.content if hasattr(b, "text")), "")
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_message = update.message.text
+async def _process_text(chat_id, user_message, reply_func):
     loop = asyncio.get_running_loop()
 
     if DATABASE_URL:
@@ -557,6 +624,69 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conversation_histories[chat_id].append({"role": "assistant", "content": reply})
         if len(conversation_histories[chat_id]) > 20:
             conversation_histories[chat_id] = conversation_histories[chat_id][-20:]
+
+    await reply_func(reply)
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _process_text(update.effective_chat.id, update.message.text, update.message.reply_text)
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not has_openai():
+        await update.message.reply_text("Voice messages aren't set up yet — OPENAI_API_KEY missing.")
+        return
+
+    voice_file = await update.message.voice.get_file()
+    audio_bytes = await voice_file.download_as_bytearray()
+
+    from openai import OpenAI as OpenAIClient
+    client = OpenAIClient(api_key=os.environ.get("OPENAI_API_KEY"))
+    audio_io = io.BytesIO(bytes(audio_bytes))
+    audio_io.name = "voice.ogg"
+
+    loop = asyncio.get_running_loop()
+    transcript = await loop.run_in_executor(
+        None,
+        lambda: client.audio.transcriptions.create(model="whisper-1", file=audio_io)
+    )
+
+    user_message = transcript.text
+    await update.message.reply_text(f"_{user_message}_", parse_mode="Markdown")
+    await _process_text(update.effective_chat.id, user_message, update.message.reply_text)
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    photo_file = await update.message.photo[-1].get_file()
+    photo_bytes = await photo_file.download_as_bytearray()
+
+    image_data = base64.b64encode(bytes(photo_bytes)).decode()
+    caption = update.message.caption or "What do you think of this?"
+
+    content = [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data}},
+        {"type": "text", "text": caption},
+    ]
+
+    loop = asyncio.get_running_loop()
+
+    if DATABASE_URL:
+        history = await loop.run_in_executor(None, db_load_history, chat_id)
+    else:
+        history = list(conversation_histories.get(chat_id, []))
+
+    messages = history + [{"role": "user", "content": content}]
+    reply = await run_with_tools(messages)
+
+    if DATABASE_URL:
+        await loop.run_in_executor(None, db_save_message, chat_id, "user", f"[Image] {caption}")
+        await loop.run_in_executor(None, db_save_message, chat_id, "assistant", reply)
+    else:
+        conversation_histories.setdefault(chat_id, []).extend([
+            {"role": "user", "content": f"[Image] {caption}"},
+            {"role": "assistant", "content": reply},
+        ])
 
     await update.message.reply_text(reply)
 
@@ -614,6 +744,7 @@ async def post_init(application: Application):
         scheduler.add_job(send_morning_checkin, "cron", hour=7, minute=0, args=[application.bot])
         scheduler.add_job(send_evening_checkin, "cron", day_of_week="mon-sat", hour=23, minute=0, args=[application.bot])
         scheduler.add_job(send_weekly_review, "cron", day_of_week="sun", hour=23, minute=0, args=[application.bot])
+        scheduler.add_job(check_reminders, "interval", minutes=1, args=[application.bot])
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
         logger.info("Scheduled: morning 07:00, evening 23:00 (Mon-Sat), weekly review 23:00 (Sun)")
@@ -640,6 +771,8 @@ def main():
     app.add_handler(CommandHandler("test", test_checkin))
     app.add_handler(CommandHandler("evening", evening_checkin))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     logger.info("Bot starting...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
