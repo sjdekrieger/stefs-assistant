@@ -321,8 +321,8 @@ def has_search():
     return bool(os.environ.get("TAVILY_API_KEY"))
 
 
-def has_openai():
-    return bool(os.environ.get("OPENAI_API_KEY"))
+def has_voice():
+    return bool(os.environ.get("GROQ_API_KEY"))
 
 
 def search_web(query):
@@ -633,22 +633,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not has_openai():
-        await update.message.reply_text("Voice messages aren't set up yet — OPENAI_API_KEY missing.")
+    if not has_voice():
+        await update.message.reply_text("Voice messages aren't set up yet — GROQ_API_KEY missing.")
         return
 
     voice_file = await update.message.voice.get_file()
     audio_bytes = await voice_file.download_as_bytearray()
 
-    from openai import OpenAI as OpenAIClient
-    client = OpenAIClient(api_key=os.environ.get("OPENAI_API_KEY"))
+    from groq import Groq
+    client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
     audio_io = io.BytesIO(bytes(audio_bytes))
     audio_io.name = "voice.ogg"
 
     loop = asyncio.get_running_loop()
     transcript = await loop.run_in_executor(
         None,
-        lambda: client.audio.transcriptions.create(model="whisper-1", file=audio_io)
+        lambda: client.audio.transcriptions.create(
+            file=("voice.ogg", audio_io),
+            model="whisper-large-v3-turbo",
+        )
     )
 
     user_message = transcript.text
