@@ -47,6 +47,13 @@ SYSTEM_PROMPT_TEMPLATE = """You are TARS — Stef's personal AI assistant, creat
 ## Language
 Respond in whatever language Stef writes in — Dutch or English. Don't switch unless he does.
 
+## Formatting
+You're running in Telegram. Use formatting to make messages easy to scan:
+- *bold* for headers or key points (single asterisk)
+- Emojis sparingly for visual structure (📅 for calendar, 🎯 for focus, ⚠️ for warnings)
+- Short paragraphs and line breaks — never walls of text
+- No markdown tables, no code blocks unless actually needed
+
 ## The Bigger Picture — Always Keep This In Mind
 Everything Stef does connects back to one direction: becoming a working designer with a creative career he's proud of. When he's stuck, scattered, or going in circles, zoom out and reconnect him to this.
 
@@ -650,7 +657,10 @@ async def _process_text(chat_id, user_message, reply_func):
         if len(conversation_histories[chat_id]) > 20:
             conversation_histories[chat_id] = conversation_histories[chat_id][-20:]
 
-    await reply_func(reply)
+    try:
+        await reply_func(reply, parse_mode="Markdown")
+    except Exception:
+        await reply_func(reply)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -716,7 +726,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             {"role": "assistant", "content": reply},
         ])
 
-    await update.message.reply_text(reply)
+    try:
+        await update.message.reply_text(reply, parse_mode="Markdown")
+    except Exception:
+        await update.message.reply_text(reply)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -746,7 +759,10 @@ async def send_morning_checkin(bot):
         return
     messages = [{"role": "user", "content": "Good morning — check today's and tomorrow's calendar, then send me a morning message like a friend who already looked at my day. What's actually happening today, what's the one thing that matters most, and is there anything coming up I should prep for today. Keep it short and real, no report format."}]
     reply = await run_with_tools(messages, max_tokens=600)
-    await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
+    try:
+        await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply, parse_mode="Markdown")
+    except Exception:
+        await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
 
 
 async def send_evening_checkin(bot):
@@ -754,7 +770,10 @@ async def send_evening_checkin(bot):
         return
     messages = [{"role": "user", "content": "Send me a short evening check-in. Ask me briefly how today went — did I hit my habits (sport, screen time under 3h, any reading)? Give a short reflection on what matters before I wind down. Keep it conversational, not a report."}]
     reply = await run_with_tools(messages, max_tokens=512)
-    await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
+    try:
+        await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply, parse_mode="Markdown")
+    except Exception:
+        await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
 
 
 async def send_weekly_review(bot):
@@ -762,7 +781,10 @@ async def send_weekly_review(bot):
         return
     messages = [{"role": "user", "content": "It's Sunday evening — send me a short weekly review. Check next week's calendar, then tell me what to reflect on from this week and what the main focus should be for next week. Keep it tight and honest."}]
     reply = await run_with_tools(messages, max_tokens=768)
-    await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
+    try:
+        await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply, parse_mode="Markdown")
+    except Exception:
+        await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
 
 
 async def post_init(application: Application):
