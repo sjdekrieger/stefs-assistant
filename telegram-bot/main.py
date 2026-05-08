@@ -448,9 +448,9 @@ def create_calendar_event(title, date, start_time=None, end_time=None, descripti
         service = build("calendar", "v3", credentials=get_google_creds(), cache_discovery=False)
 
         if start_time:
-            start_dt = datetime.fromisoformat(f"{date}T{start_time}").replace(tzinfo=tz)
+            start_dt = tz.localize(datetime.fromisoformat(f"{date}T{start_time}"))
             if end_time:
-                end_dt = datetime.fromisoformat(f"{date}T{end_time}").replace(tzinfo=tz)
+                end_dt = tz.localize(datetime.fromisoformat(f"{date}T{end_time}"))
             else:
                 end_dt = start_dt + timedelta(hours=1)
             body = {
