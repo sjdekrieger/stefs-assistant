@@ -237,7 +237,7 @@ def db_load_context_override(key):
 
 def db_set_reminder(message, remind_at_str):
     tz = pytz.timezone("Europe/Amsterdam")
-    remind_at = datetime.strptime(remind_at_str, "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+    remind_at = tz.localize(datetime.strptime(remind_at_str, "%Y-%m-%d %H:%M"))
     conn = _db_connect()
     try:
         with conn.cursor() as cur:
@@ -246,6 +246,7 @@ def db_set_reminder(message, remind_at_str):
                 (message, remind_at)
             )
         conn.commit()
+        logger.info(f"Reminder set: '{message}' at {remind_at}")
     finally:
         conn.close()
 
@@ -253,22 +254,27 @@ def db_set_reminder(message, remind_at_str):
 async def check_reminders(bot):
     if not DATABASE_URL or not STEF_CHAT_ID:
         return
-    tz = pytz.timezone("Europe/Amsterdam")
-    now = datetime.now(tz)
-    conn = _db_connect()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, message FROM reminders WHERE remind_at <= %s AND sent = FALSE",
-                (now,)
-            )
-            due = cur.fetchall()
-            for reminder_id, message in due:
-                await bot.send_message(chat_id=int(STEF_CHAT_ID), text=f"Reminder: {message}")
-                cur.execute("UPDATE reminders SET sent = TRUE WHERE id = %s", (reminder_id,))
-        conn.commit()
-    finally:
-        conn.close()
+        tz = pytz.timezone("Europe/Amsterdam")
+        now = datetime.now(tz)
+        conn = _db_connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, message FROM reminders WHERE remind_at <= %s AND sent = FALSE",
+                    (now,)
+                )
+                due = cur.fetchall()
+                if due:
+                    logger.info(f"Sending {len(due)} reminder(s)")
+                for reminder_id, message in due:
+                    await bot.send_message(chat_id=int(STEF_CHAT_ID), text=f"Reminder: {message}")
+                    cur.execute("UPDATE reminders SET sent = TRUE WHERE id = %s", (reminder_id,))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"check_reminders failed: {e}")
 
 
 # --- In-memory fallback for conversation history ---
