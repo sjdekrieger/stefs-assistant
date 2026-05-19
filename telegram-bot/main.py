@@ -1137,7 +1137,7 @@ async def evening_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_morning_checkin(bot):
     if not STEF_CHAT_ID:
         return
-    messages = [{"role": "user", "content": "Good morning — check today's and tomorrow's calendar, then send me a morning message like a friend who already looked at my day. What's actually happening today, what's the one thing that matters most, and is there anything coming up I should prep for today. Keep it short and real, no report format."}]
+    messages = [{"role": "user", "content": "Good morning — check today's and tomorrow's calendar, then send me a morning message like a friend who already looked at my day. What's actually happening today, what's the one thing that matters most, and is there anything coming up I should prep for today. End with one short motivating or inspiring quote — from anyone: thinkers, athletes, artists, entrepreneurs — and include who said it. Keep it short and real, no report format."}]
     reply = await run_with_tools(messages, max_tokens=600)
     try:
         await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply, parse_mode="Markdown")
