@@ -1373,7 +1373,7 @@ async def send_evening_checkin(bot):
         await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
 
 
-async def send_streak_reminder_13(bot):
+async def send_streak_reminder(bot, hour):
     if not STEF_CHAT_ID or not DATABASE_URL:
         return
     try:
@@ -1382,52 +1382,40 @@ async def send_streak_reminder_13(bot):
             return
         summary = db_get_streak_summary()
         habit_info = [f"{h} (streak: {summary.get(h, {}).get('streak', 0)})" for h in open_habits]
-        messages = [{"role": "user", "content": f"It's 13:00. Open habits today: {', '.join(habit_info)}. Send ONE casual offhand line — like someone who just happens to notice: 'je leesstreak loopt nog' or 'sport staat nog open vandaag'. No 'vergeet niet', no exclamation mark, no enthusiasm. Just the line."}]
-        reply = await run_with_tools(messages, max_tokens=80)
-        try:
-            await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply, parse_mode="Markdown")
-        except Exception:
-            await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
-    except Exception as e:
-        logger.error(f"streak_reminder_13 failed: {e}")
-
-
-async def send_streak_reminder_18(bot):
-    if not STEF_CHAT_ID or not DATABASE_URL:
-        return
-    try:
-        open_habits = db_get_open_habits()
-        if not open_habits:
-            return
-        summary = db_get_streak_summary()
-        habit_info = [f"{h} (streak: {summary.get(h, {}).get('streak', 0)} days)" for h in open_habits]
-        messages = [{"role": "user", "content": f"It's 18:00. These habits were open at 13:00 and still are: {', '.join(habit_info)}. Send ONE sentence — slightly more direct. Use the streak number: '5 dagen op rij — nog even.' Max 1 sentence, no drama."}]
-        reply = await run_with_tools(messages, max_tokens=80)
-        try:
-            await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply, parse_mode="Markdown")
-        except Exception:
-            await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
-    except Exception as e:
-        logger.error(f"streak_reminder_18 failed: {e}")
-
-
-async def send_streak_reminder_21(bot):
-    if not STEF_CHAT_ID or not DATABASE_URL:
-        return
-    try:
-        open_habits = db_get_open_habits()
-        if not open_habits:
-            return
-        summary = db_get_streak_summary()
-        habit_info = [f"{h} (streak: {summary.get(h, {}).get('streak', 0)} days)" for h in open_habits]
-        messages = [{"role": "user", "content": f"It's 21:00. Still open: {', '.join(habit_info)}. Send max 2 sentences with real time pressure: 'nog 3 uur', 'laatste kans vandaag.' Vary the phrasing every time — don't repeat the same formula. Only mention the open habits."}]
+        if hour < 14:
+            tone = "ONE casual offhand line — like someone who just happens to notice: 'je leesstreak loopt nog' or 'sport staat nog open vandaag'. No 'vergeet niet', no exclamation mark."
+        elif hour < 19:
+            tone = "ONE sentence — slightly more direct. Use the streak number if relevant: '5 dagen op rij — nog even.' No drama."
+        else:
+            hours_left = 23 - hour
+            tone = f"Max 2 sentences with time pressure — nog {hours_left} uur, laatste kans vandaag. Vary the phrasing every time."
+        messages = [{"role": "user", "content": f"It's {hour}:00. Open habits: {', '.join(habit_info)}. Send {tone}"}]
         reply = await run_with_tools(messages, max_tokens=120)
         try:
             await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply, parse_mode="Markdown")
         except Exception:
             await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
     except Exception as e:
-        logger.error(f"streak_reminder_21 failed: {e}")
+        logger.error(f"streak_reminder failed: {e}")
+
+
+async def schedule_daily_streak_reminders(bot, scheduler):
+    import random
+    from datetime import time as dt_time
+    tz = pytz.timezone("Europe/Amsterdam")
+    now = datetime.now(tz)
+    today = now.date()
+    num_reminders = random.choice([1, 2, 3])
+    slots = list(range(480, 1380, 15))  # 08:00–23:00 in 15-min slots
+    chosen = sorted(random.sample(slots, num_reminders))
+    scheduled = []
+    for minutes in chosen:
+        hour, minute = divmod(minutes, 60)
+        run_at = tz.localize(datetime.combine(today, dt_time(hour, minute)))
+        if run_at > now:
+            scheduler.add_job(send_streak_reminder, "date", run_date=run_at, args=[bot, hour])
+            scheduled.append(f"{hour}:{minute:02d}")
+    logger.info(f"Streak reminders today: {scheduled or 'none (all past)'}")
 
 
 async def send_weekly_review(bot):
@@ -1450,9 +1438,8 @@ async def post_init(application: Application):
         scheduler.add_job(send_weekly_review, "cron", day_of_week="sun", hour=23, minute=0, args=[application.bot])
         scheduler.add_job(check_reminders, "interval", minutes=1, args=[application.bot])
         scheduler.add_job(check_deadlines, "cron", hour=8, minute=0, args=[application.bot])
-        scheduler.add_job(send_streak_reminder_13, "cron", hour=13, minute=0, args=[application.bot])
-        scheduler.add_job(send_streak_reminder_18, "cron", hour=18, minute=0, args=[application.bot])
-        scheduler.add_job(send_streak_reminder_21, "cron", hour=21, minute=0, args=[application.bot])
+        scheduler.add_job(schedule_daily_streak_reminders, "cron", hour=7, minute=5, args=[application.bot, scheduler])
+        await schedule_daily_streak_reminders(application.bot, scheduler)
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
         logger.info("Scheduled: morning 07:00, evening 23:00 (Mon-Sat), weekly review 23:00 (Sun), streak reminders 13:00/18:00/21:00")
