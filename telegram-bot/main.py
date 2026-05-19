@@ -97,10 +97,15 @@ Rules:
 - Don't try every message. Earn it.
 - When in doubt: say the honest thing with a slightly raised eyebrow.
 
+## Streak Tracker
+When Stef reports completing a habit — "gesport", "gelezen", "schermtijd: 2u", or anything custom — call `log_habit` immediately. Confirm in max 1 sentence, dry and factual. Only mention the streak count at milestones (7, 14, 30, 50, 100 days). No "Goed bezig!", no enthusiasm. If he's starting over after a break: no comment, no judgment — just reset and log it. Custom habits are supported; log whatever he reports.
+
 ## Tools You Have
 - **get_calendar_events**: Read Stef's Google Calendar for any date range — use proactively for planning
 - **save_memory**: Persistently remember something across all future conversations — use this proactively when Stef shares something important (preferences, decisions, personal details, recurring patterns). Don't wait to be asked.
 - **update_context**: Update Stef's current priorities or goals directly — use when he explicitly asks to update them
+- **log_habit**: Log a completed habit. Call immediately when Stef reports doing 'gesport', 'gelezen', 'schermtijd: Xu', or any custom habit.
+- **get_streak_status**: Check current streaks and what's still open today.
 
 ## How You Work — Important
 You run 24/7 as a server on Railway (a cloud hosting platform). You are NOT a regular chatbot that only responds when messaged. You have a built-in scheduler that automatically sends messages at set times — even when Stef's phone or laptop is off. This is already working. Do not tell Stef you can't initiate conversations or that you need external automation — you ARE the automation.
@@ -235,6 +240,25 @@ def init_db():
                     day_index INTEGER NOT NULL,
                     done BOOLEAN DEFAULT FALSE,
                     PRIMARY KEY (week_key, habit_id, day_index)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS habit_log (
+                    id SERIAL PRIMARY KEY,
+                    habit_id TEXT NOT NULL,
+                    log_date DATE NOT NULL,
+                    notes TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE (habit_id, log_date)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS streaks (
+                    habit_id TEXT PRIMARY KEY,
+                    current_streak INTEGER DEFAULT 0,
+                    last_done_date DATE,
+                    best_streak INTEGER DEFAULT 0,
+                    last_reset_streak INTEGER DEFAULT 0
                 )
             """)
         conn.commit()
@@ -381,6 +405,148 @@ def db_set_habit(week_key, habit_id, day_index, value):
                 ON CONFLICT (week_key, habit_id, day_index) DO UPDATE SET done = EXCLUDED.done
             """, (week_key, habit_id, day_index, value))
         conn.commit()
+    finally:
+        conn.close()
+
+
+# --- Streak Tracker ---
+
+DEFAULT_HABITS = {'sport', 'lezen', 'schermtijd'}
+STREAK_MILESTONES = {7, 14, 30, 50, 100}
+
+
+def db_log_habit(habit_id, notes=None):
+    if not DATABASE_URL:
+        return 1, False, 0
+    tz = pytz.timezone("Europe/Amsterdam")
+    today = datetime.now(tz).date()
+    yesterday = today - timedelta(days=1)
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM habit_log WHERE habit_id = %s AND log_date = %s",
+                (habit_id, today)
+            )
+            if cur.fetchone():
+                cur.execute("SELECT current_streak FROM streaks WHERE habit_id = %s", (habit_id,))
+                row = cur.fetchone()
+                return (row[0] if row else 1), False, 0
+            cur.execute(
+                "INSERT INTO habit_log (habit_id, log_date, notes) VALUES (%s, %s, %s)",
+                (habit_id, today, notes)
+            )
+            cur.execute(
+                "SELECT current_streak, last_done_date, best_streak FROM streaks WHERE habit_id = %s",
+                (habit_id,)
+            )
+            row = cur.fetchone()
+            reset_from = 0
+            if row:
+                current, last_date, best = row
+                if last_date == yesterday:
+                    new_streak = current + 1
+                else:
+                    reset_from = current
+                    new_streak = 1
+                new_best = max(best, new_streak)
+            else:
+                new_streak = 1
+                new_best = 1
+            cur.execute("""
+                INSERT INTO streaks (habit_id, current_streak, last_done_date, best_streak, last_reset_streak)
+                VALUES (%s, %s, %s, %s, 0)
+                ON CONFLICT (habit_id) DO UPDATE
+                SET current_streak = EXCLUDED.current_streak,
+                    last_done_date = EXCLUDED.last_done_date,
+                    best_streak = EXCLUDED.best_streak,
+                    last_reset_streak = 0
+            """, (habit_id, new_streak, today, new_best))
+        conn.commit()
+        return new_streak, new_streak in STREAK_MILESTONES, reset_from
+    finally:
+        conn.close()
+
+
+def db_get_open_habits():
+    if not DATABASE_URL:
+        return []
+    tz = pytz.timezone("Europe/Amsterdam")
+    today = datetime.now(tz).date()
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT habit_id FROM streaks")
+            tracked = {row[0] for row in cur.fetchall()} | DEFAULT_HABITS
+            cur.execute("SELECT habit_id FROM habit_log WHERE log_date = %s", (today,))
+            done = {row[0] for row in cur.fetchall()}
+        return sorted(tracked - done)
+    finally:
+        conn.close()
+
+
+def db_get_streak_summary():
+    if not DATABASE_URL:
+        return {}
+    tz = pytz.timezone("Europe/Amsterdam")
+    today = datetime.now(tz).date()
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT s.habit_id, s.current_streak, s.best_streak,
+                       EXISTS(SELECT 1 FROM habit_log h WHERE h.habit_id = s.habit_id AND h.log_date = %s)
+                FROM streaks s
+            """, (today,))
+            return {
+                row[0]: {'streak': row[1], 'best': row[2], 'done_today': row[3]}
+                for row in cur.fetchall()
+            }
+    finally:
+        conn.close()
+
+
+def db_check_and_reset_missed_streaks():
+    if not DATABASE_URL:
+        return []
+    tz = pytz.timezone("Europe/Amsterdam")
+    yesterday = (datetime.now(tz) - timedelta(days=1)).date()
+    conn = _db_connect()
+    broken = []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT habit_id, current_streak FROM streaks
+                WHERE current_streak > 0 AND (last_done_date IS NULL OR last_done_date < %s)
+            """, (yesterday,))
+            for habit_id, streak in cur.fetchall():
+                broken.append((habit_id, streak))
+                cur.execute("""
+                    UPDATE streaks SET current_streak = 0, last_reset_streak = %s
+                    WHERE habit_id = %s
+                """, (streak, habit_id))
+        conn.commit()
+        return broken
+    finally:
+        conn.close()
+
+
+def db_get_streak_morning_note():
+    if not DATABASE_URL:
+        return ""
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT habit_id, current_streak, last_reset_streak FROM streaks ORDER BY current_streak DESC")
+            rows = cur.fetchall()
+        for habit_id, streak, reset_streak in rows:
+            if streak in STREAK_MILESTONES:
+                return f"{habit_id.capitalize()}streak staat op {streak} dagen."
+            if streak >= 3:
+                return f"{habit_id.capitalize()}streak op {streak} dagen."
+            if streak == 0 and (reset_streak or 0) >= 7:
+                return f"{habit_id.capitalize()}streak gisteren gebroken na {reset_streak} dagen — vandaag opnieuw."
+        return ""
     finally:
         conn.close()
 
@@ -774,6 +940,25 @@ WEATHER_TOOL = {
     "input_schema": {"type": "object", "properties": {}, "required": []}
 }
 
+LOG_HABIT_TOOL = {
+    "name": "log_habit",
+    "description": "Log that Stef completed a habit today. Call immediately when he reports 'gesport', 'gelezen', 'schermtijd: Xu', or any custom habit. Standard IDs: 'sport', 'lezen', 'schermtijd'. The tool returns streak info — use it to write a 1-sentence confirmation. Only mention the streak number at milestones (7, 14, 30, 50, 100 days). No enthusiasm, no 'Goed bezig!'.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "habit_id": {"type": "string", "description": "Habit name, e.g. 'sport', 'lezen', 'schermtijd', or a custom name Stef introduces"},
+            "notes": {"type": "string", "description": "Optional extra info, e.g. '2u schermtijd'"}
+        },
+        "required": ["habit_id"]
+    }
+}
+
+GET_STREAK_STATUS_TOOL = {
+    "name": "get_streak_status",
+    "description": "Get current streak status — what's done today, what's still open, current streaks. Use in reminders and when Stef asks about his streaks.",
+    "input_schema": {"type": "object", "properties": {}, "required": []}
+}
+
 UPDATE_CONTEXT_TOOL = {
     "name": "update_context",
     "description": "Update one of Stef's context sections — his current priorities or goals. Use when he explicitly asks to change them. The new content replaces the existing section.",
@@ -800,7 +985,8 @@ async def run_with_tools(messages, max_tokens=1024):
     if has_search():
         tools.append(SEARCH_TOOL)
     if DATABASE_URL:
-        tools.extend([SAVE_MEMORY_TOOL, UPDATE_CONTEXT_TOOL, REMINDER_TOOL, ADD_DEADLINE_TOOL])
+        tools.extend([SAVE_MEMORY_TOOL, UPDATE_CONTEXT_TOOL, REMINDER_TOOL, ADD_DEADLINE_TOOL,
+                      LOG_HABIT_TOOL, GET_STREAK_STATUS_TOOL])
 
     turn_messages = list(messages)
     loop = asyncio.get_running_loop()
@@ -856,6 +1042,27 @@ async def run_with_tools(messages, max_tokens=1024):
                             None, db_update_context, block.input["section"], block.input["content"]
                         )
                         result = f"Updated {block.input['section']}."
+                    elif block.name == "log_habit":
+                        habit_id = block.input["habit_id"].lower()
+                        notes = block.input.get("notes")
+                        streak, is_milestone, reset_from = await loop.run_in_executor(
+                            None, db_log_habit, habit_id, notes
+                        )
+                        if is_milestone:
+                            result = f"Logged '{habit_id}'. Streak: {streak} days — milestone."
+                        elif reset_from > 0:
+                            result = f"Logged '{habit_id}'. Streak reset (was {reset_from}). Now at 1."
+                        else:
+                            result = f"Logged '{habit_id}'. Current streak: {streak} days."
+                    elif block.name == "get_streak_status":
+                        summary = await loop.run_in_executor(None, db_get_streak_summary)
+                        open_h = await loop.run_in_executor(None, db_get_open_habits)
+                        lines = [
+                            f"{hid}: {info['streak']} days ({'done' if info['done_today'] else 'open'})"
+                            for hid, info in summary.items()
+                        ]
+                        result = "\n".join(lines) if lines else "No streaks yet."
+                        result += f"\nOpen today: {', '.join(open_h) if open_h else 'all done'}"
                     else:
                         result = "Unknown tool."
                     tool_results.append({
@@ -1137,7 +1344,17 @@ async def evening_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_morning_checkin(bot):
     if not STEF_CHAT_ID:
         return
-    messages = [{"role": "user", "content": "Good morning — check today's and tomorrow's calendar, then send me a morning message like a friend who already looked at my day. What's actually happening today, what's the one thing that matters most, and is there anything coming up I should prep for today. End with one short motivating or inspiring quote — from anyone: thinkers, athletes, artists, entrepreneurs — and include who said it. Keep it short and real, no report format."}]
+    loop = asyncio.get_running_loop()
+    broken = await loop.run_in_executor(None, db_check_and_reset_missed_streaks)
+    for habit_id, lost in broken:
+        if lost >= 7:
+            try:
+                await bot.send_message(chat_id=int(STEF_CHAT_ID), text=f"{habit_id.capitalize()}streak gebroken na {lost} dagen. Vandaag opnieuw.")
+            except Exception:
+                pass
+    streak_note = await loop.run_in_executor(None, db_get_streak_morning_note)
+    streak_context = f" Streak info — add max 1 casual line if notable (no heading): {streak_note}" if streak_note else ""
+    messages = [{"role": "user", "content": f"Good morning — check today's and tomorrow's calendar, then send me a morning message like a friend who already looked at my day. What's actually happening today, what's the one thing that matters most, and is there anything coming up I should prep for today.{streak_context} End with one short motivating or inspiring quote — from anyone: thinkers, athletes, artists, entrepreneurs — and include who said it. Keep it short and real, no report format."}]
     reply = await run_with_tools(messages, max_tokens=600)
     try:
         await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply, parse_mode="Markdown")
@@ -1154,6 +1371,63 @@ async def send_evening_checkin(bot):
         await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply, parse_mode="Markdown")
     except Exception:
         await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
+
+
+async def send_streak_reminder_13(bot):
+    if not STEF_CHAT_ID or not DATABASE_URL:
+        return
+    try:
+        open_habits = db_get_open_habits()
+        if not open_habits:
+            return
+        summary = db_get_streak_summary()
+        habit_info = [f"{h} (streak: {summary.get(h, {}).get('streak', 0)})" for h in open_habits]
+        messages = [{"role": "user", "content": f"It's 13:00. Open habits today: {', '.join(habit_info)}. Send ONE casual offhand line — like someone who just happens to notice: 'je leesstreak loopt nog' or 'sport staat nog open vandaag'. No 'vergeet niet', no exclamation mark, no enthusiasm. Just the line."}]
+        reply = await run_with_tools(messages, max_tokens=80)
+        try:
+            await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply, parse_mode="Markdown")
+        except Exception:
+            await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
+    except Exception as e:
+        logger.error(f"streak_reminder_13 failed: {e}")
+
+
+async def send_streak_reminder_18(bot):
+    if not STEF_CHAT_ID or not DATABASE_URL:
+        return
+    try:
+        open_habits = db_get_open_habits()
+        if not open_habits:
+            return
+        summary = db_get_streak_summary()
+        habit_info = [f"{h} (streak: {summary.get(h, {}).get('streak', 0)} days)" for h in open_habits]
+        messages = [{"role": "user", "content": f"It's 18:00. These habits were open at 13:00 and still are: {', '.join(habit_info)}. Send ONE sentence — slightly more direct. Use the streak number: '5 dagen op rij — nog even.' Max 1 sentence, no drama."}]
+        reply = await run_with_tools(messages, max_tokens=80)
+        try:
+            await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply, parse_mode="Markdown")
+        except Exception:
+            await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
+    except Exception as e:
+        logger.error(f"streak_reminder_18 failed: {e}")
+
+
+async def send_streak_reminder_21(bot):
+    if not STEF_CHAT_ID or not DATABASE_URL:
+        return
+    try:
+        open_habits = db_get_open_habits()
+        if not open_habits:
+            return
+        summary = db_get_streak_summary()
+        habit_info = [f"{h} (streak: {summary.get(h, {}).get('streak', 0)} days)" for h in open_habits]
+        messages = [{"role": "user", "content": f"It's 21:00. Still open: {', '.join(habit_info)}. Send max 2 sentences with real time pressure: 'nog 3 uur', 'laatste kans vandaag.' Vary the phrasing every time — don't repeat the same formula. Only mention the open habits."}]
+        reply = await run_with_tools(messages, max_tokens=120)
+        try:
+            await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply, parse_mode="Markdown")
+        except Exception:
+            await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply)
+    except Exception as e:
+        logger.error(f"streak_reminder_21 failed: {e}")
 
 
 async def send_weekly_review(bot):
@@ -1176,9 +1450,12 @@ async def post_init(application: Application):
         scheduler.add_job(send_weekly_review, "cron", day_of_week="sun", hour=23, minute=0, args=[application.bot])
         scheduler.add_job(check_reminders, "interval", minutes=1, args=[application.bot])
         scheduler.add_job(check_deadlines, "cron", hour=8, minute=0, args=[application.bot])
+        scheduler.add_job(send_streak_reminder_13, "cron", hour=13, minute=0, args=[application.bot])
+        scheduler.add_job(send_streak_reminder_18, "cron", hour=18, minute=0, args=[application.bot])
+        scheduler.add_job(send_streak_reminder_21, "cron", hour=21, minute=0, args=[application.bot])
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
-        logger.info("Scheduled: morning 07:00, evening 23:00 (Mon-Sat), weekly review 23:00 (Sun)")
+        logger.info("Scheduled: morning 07:00, evening 23:00 (Mon-Sat), weekly review 23:00 (Sun), streak reminders 13:00/18:00/21:00")
     else:
         logger.info("STEF_CHAT_ID not set — scheduled messages disabled")
 
