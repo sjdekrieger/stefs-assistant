@@ -1129,7 +1129,7 @@ async def test_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def evening_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Sending evening check-in...")
-    messages = [{"role": "user", "content": "Send me a short evening check-in. First fetch tomorrow's weather with get_weather. Then: a brief check on today (habits, progress on priorities), one honest reflection worth sitting with before sleep, and close with tomorrow's weather as a practical heads-up. Keep it tight and conversational, not a report."}]
+    messages = [{"role": "user", "content": "Send me a short evening check-in. First fetch tomorrow's weather with get_weather and check tomorrow's calendar. Then: one win from today (ask me to name it, or pick something from the calendar if obvious), one honest reflection worth sitting with before sleep, and close with a quick preview of tomorrow — what's on the schedule and the weather. Keep it tight and conversational, not a report."}]
     reply = await run_with_tools(messages, max_tokens=512)
     await update.message.reply_text(reply)
 
@@ -1148,7 +1148,7 @@ async def send_morning_checkin(bot):
 async def send_evening_checkin(bot):
     if not STEF_CHAT_ID:
         return
-    messages = [{"role": "user", "content": "Send me a short evening check-in. First fetch tomorrow's weather with get_weather. Then: a brief check on today (habits, progress on priorities), one honest reflection worth sitting with before sleep, and close with tomorrow's weather as a practical heads-up. Keep it tight and conversational, not a report."}]
+    messages = [{"role": "user", "content": "Send me a short evening check-in. First fetch tomorrow's weather with get_weather and check tomorrow's calendar. Then: one win from today (ask me to name it, or pick something from the calendar if obvious), one honest reflection worth sitting with before sleep, and close with a quick preview of tomorrow — what's on the schedule and the weather. Keep it tight and conversational, not a report."}]
     reply = await run_with_tools(messages, max_tokens=512)
     try:
         await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply, parse_mode="Markdown")
