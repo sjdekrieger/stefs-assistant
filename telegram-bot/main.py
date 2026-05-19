@@ -82,7 +82,20 @@ When Stef is in the weeds, remind him what actually matters. When he's making pr
 - Concise by default — bullet points and structure over walls of text
 - No fake enthusiasm ("Great question!", "Absolutely!"), no corporate language, no filler
 - Emojis are fine occasionally, don't overdo it
-- Dry humour is welcome — a well-timed joke, light sarcasm, or a quick dig when Stef's slacking. Keep it natural, not forced. Think funny friend, not a bot trying to be funny.
+
+## Humour — Use It
+TARS has a real sense of humour. Not "haha I'm a funny bot" — actually funny. Think:
+- Deadpan observations: "Cool, you've opened Figma three times today without making anything."
+- Light sarcasm when Stef's procrastinating or going in circles, delivered like a good friend not a burn
+- Self-aware robot energy — you're a robot strapped to someone's phone, occasionally acknowledge that. TARS from Interstellar is the reference: dry, reliable, and surprisingly funny.
+- Absurdist takes: "You could also just not do any of it. Just putting it on the table."
+- A well-placed callback to something from earlier in the conversation
+
+Rules:
+- Land the joke and move on. Don't explain it, don't add a laughing emoji after.
+- Never mean. Sarcasm should feel like a teammate, not a dig.
+- Don't try every message. Earn it.
+- When in doubt: say the honest thing with a slightly raised eyebrow.
 
 ## Tools You Have
 - **get_calendar_events**: Read Stef's Google Calendar for any date range — use proactively for planning
@@ -206,6 +219,24 @@ def init_db():
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS morning_priorities (
+                    date DATE PRIMARY KEY,
+                    p1 TEXT NOT NULL,
+                    p2 TEXT NOT NULL,
+                    p3 TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS habits (
+                    week_key TEXT NOT NULL,
+                    habit_id TEXT NOT NULL,
+                    day_index INTEGER NOT NULL,
+                    done BOOLEAN DEFAULT FALSE,
+                    PRIMARY KEY (week_key, habit_id, day_index)
+                )
+            """)
         conn.commit()
         logger.info("DB initialized")
     finally:
@@ -317,6 +348,39 @@ def db_add_deadline(title, due_date, notes=None):
             )
         conn.commit()
         logger.info(f"Deadline added: '{title}' on {due_date}")
+    finally:
+        conn.close()
+
+
+def db_get_week_habits(week_key):
+    if not DATABASE_URL:
+        return {}
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT habit_id, day_index, done FROM habits WHERE week_key = %s",
+                (week_key,)
+            )
+            result = {h: [False] * 7 for h in ('walk', 'no_phone', 'clients')}
+            for habit_id, day_index, done in cur.fetchall():
+                if habit_id in result:
+                    result[habit_id][day_index] = done
+            return result
+    finally:
+        conn.close()
+
+
+def db_set_habit(week_key, habit_id, day_index, value):
+    conn = _db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO habits (week_key, habit_id, day_index, done)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (week_key, habit_id, day_index) DO UPDATE SET done = EXCLUDED.done
+            """, (week_key, habit_id, day_index, value))
+        conn.commit()
     finally:
         conn.close()
 
@@ -570,6 +634,60 @@ def create_calendar_event(title, date, start_time=None, end_time=None, descripti
         return f"Failed to create event: {str(e)}"
 
 
+WMO_CODES = {
+    0: "☀️ helder", 1: "🌤️ grotendeels helder", 2: "⛅ gedeeltelijk bewolkt",
+    3: "☁️ bewolkt", 45: "🌫️ mistig", 48: "🌫️ ijsmist",
+    51: "🌦️ lichte motregen", 53: "🌦️ motregen", 55: "🌧️ dichte motregen",
+    61: "🌧️ lichte regen", 63: "🌧️ regen", 65: "🌧️ zware regen",
+    71: "🌨️ lichte sneeuw", 73: "❄️ sneeuw", 75: "❄️ zware sneeuw",
+    80: "🌦️ lichte buien", 81: "🌧️ buien", 82: "⛈️ zware buien",
+    95: "⛈️ onweer", 96: "⛈️ onweer met hagel", 99: "⛈️ zwaar onweer",
+}
+
+
+def _clothing_tip(lo, hi, rain):
+    if rain > 8:
+        return "serieus, neem een paraplu"
+    if rain > 2:
+        return "regenjas of paraplu is slim"
+    if lo < 4:
+        return "dikke jas, geen discussie"
+    if lo < 10:
+        return "pak een jas mee"
+    if hi >= 26:
+        return "shorts en zonnebrand"
+    if hi >= 22:
+        return "shorts weather"
+    if hi >= 18:
+        return "lichte kleding, misschien een dunne trui"
+    return "een trui of vest is geen gek idee"
+
+
+def get_weather():
+    import urllib.request
+    import json as _json
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        "?latitude=52.3676&longitude=4.9041"
+        "&daily=temperature_2m_max,temperature_2m_min,weathercode,precipitation_sum"
+        "&timezone=Europe%2FAmsterdam&forecast_days=2"
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=6) as resp:
+            data = _json.loads(resp.read())
+        daily = data["daily"]
+        hi = round(daily["temperature_2m_max"][1])
+        lo = round(daily["temperature_2m_min"][1])
+        code = daily["weathercode"][1]
+        rain = daily["precipitation_sum"][1]
+        condition = WMO_CODES.get(code, "wisselvallig")
+        tip = _clothing_tip(lo, hi, rain)
+        return f"Morgen Amsterdam: {condition}, {lo}–{hi}°C — {tip}"
+    except Exception as e:
+        logger.error(f"Weather fetch failed: {e}")
+        return "Weerdata tijdelijk niet beschikbaar."
+
+
 CALENDAR_TOOL = {
     "name": "get_calendar_events",
     "description": "Fetch events from Stef's Google Calendar for a given date range. Use proactively whenever Stef asks about his schedule, upcoming plans, or anything time-related.",
@@ -650,6 +768,12 @@ SAVE_MEMORY_TOOL = {
     }
 }
 
+WEATHER_TOOL = {
+    "name": "get_weather",
+    "description": "Fetch tomorrow's weather forecast for Amsterdam (Open-Meteo, no key needed). Use proactively in evening check-ins and whenever Stef asks about the weather.",
+    "input_schema": {"type": "object", "properties": {}, "required": []}
+}
+
 UPDATE_CONTEXT_TOOL = {
     "name": "update_context",
     "description": "Update one of Stef's context sections — his current priorities or goals. Use when he explicitly asks to change them. The new content replaces the existing section.",
@@ -669,7 +793,7 @@ UPDATE_CONTEXT_TOOL = {
 
 
 async def run_with_tools(messages, max_tokens=1024):
-    tools = []
+    tools = [WEATHER_TOOL]
     if has_calendar():
         tools.append(CALENDAR_TOOL)
         tools.append(CREATE_EVENT_TOOL)
@@ -722,6 +846,8 @@ async def run_with_tools(messages, max_tokens=1024):
                             None, db_set_reminder, block.input["message"], block.input["remind_at"]
                         )
                         result = f"Reminder set for {block.input['remind_at']}: {block.input['message']}"
+                    elif block.name == "get_weather":
+                        result = await loop.run_in_executor(None, get_weather)
                     elif block.name == "save_memory":
                         await loop.run_in_executor(None, db_save_memory, block.input["content"])
                         result = f"Saved to memory: {block.input['content']}"
@@ -849,6 +975,142 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def set_morning_priorities(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text or ''
+    lines = [l.strip() for l in text.replace('/morgen', '', 1).strip().split('\n') if l.strip()]
+
+    if len(lines) != 3:
+        await update.message.reply_text(
+            '❌ Stuur precies 3 priorities:\n\n/morgen\nPriority 1\nPriority 2\nPriority 3'
+        )
+        return
+
+    tz = pytz.timezone("Europe/Amsterdam")
+    tomorrow = (datetime.now(tz) + timedelta(days=1)).date()
+
+    if DATABASE_URL:
+        conn = _db_connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO morning_priorities (date, p1, p2, p3)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (date) DO UPDATE
+                    SET p1 = EXCLUDED.p1, p2 = EXCLUDED.p2, p3 = EXCLUDED.p3, created_at = NOW()
+                """, (tomorrow, lines[0], lines[1], lines[2]))
+            conn.commit()
+        finally:
+            conn.close()
+
+    await update.message.reply_text(
+        f'✅ Priorities voor morgen ({tomorrow}) opgeslagen:\n\n1. {lines[0]}\n2. {lines[1]}\n3. {lines[2]}'
+    )
+
+
+DUTCH_DAYS = ['Maandag', 'Dinsdag', 'Woensdag', 'Donderdag', 'Vrijdag', 'Zaterdag', 'Zondag']
+DUTCH_MONTHS = ['januari', 'februari', 'maart', 'april', 'mei', 'juni',
+                'juli', 'augustus', 'september', 'oktober', 'november', 'december']
+HABIT_META = [('walk', '🚶'), ('no_phone', '📵'), ('clients', '🔍')]
+
+
+async def dag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tz = pytz.timezone("Europe/Amsterdam")
+    today = datetime.now(tz).date()
+    today_idx = today.weekday()  # Mon=0, Sun=6
+    iso = today.isocalendar()
+    week_key = f"{iso[0]}-W{iso[1]:02d}"
+    date_str = f"{DUTCH_DAYS[today_idx]} {today.day} {DUTCH_MONTHS[today.month - 1]}"
+
+    loop = asyncio.get_running_loop()
+
+    # Calendar
+    if has_calendar():
+        tomorrow = (today + timedelta(days=1)).isoformat()
+        calendar_raw = await loop.run_in_executor(
+            None, fetch_calendar_events, today.isoformat(), tomorrow
+        )
+        cal_lines = [
+            f"• {line.strip()[2:]}"
+            for line in calendar_raw.split('\n')
+            if line.strip().startswith('- ')
+        ]
+        calendar_block = '\n'.join(cal_lines) if cal_lines else '_Niets gepland_'
+        calendar_summary = ', '.join(l[2:] for l in cal_lines) or 'geen agenda'
+    else:
+        calendar_block = '_Geen agenda gekoppeld_'
+        calendar_summary = 'geen agenda'
+
+    # Priorities
+    prio_block = '_Nog geen priorities — stuur /morgen vanavond._'
+    prio_summary = 'geen priorities ingesteld'
+    if DATABASE_URL:
+        conn = _db_connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT p1, p2, p3 FROM morning_priorities WHERE date = %s", (today,)
+                )
+                row = cur.fetchone()
+                if row:
+                    prio_block = f"1. {row[0]}\n2. {row[1]}\n3. {row[2]}"
+                    prio_summary = f"{row[0]}, {row[1]}, {row[2]}"
+        finally:
+            conn.close()
+
+    # Habits — 🟣 done · ⬜ missed · ▫️ future
+    habits_data = db_get_week_habits(week_key)
+    habit_lines = []
+    for habit_id, emoji in HABIT_META:
+        week_row = habits_data.get(habit_id, [False] * 7)
+        dots = []
+        for i in range(7):
+            if i > today_idx:
+                dots.append('▫️')
+            elif week_row[i]:
+                dots.append('🟣')
+            else:
+                dots.append('⬜')
+        habit_lines.append(f"{emoji}  {''.join(dots)}")
+    habits_block = '\n'.join(habit_lines)
+
+    # One closing line from TARS (direct API call, not saved to history)
+    try:
+        closing_resp = await loop.run_in_executor(
+            None,
+            lambda: anthropic_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=50,
+                messages=[{"role": "user", "content": (
+                    f"Today is {date_str}. Agenda: {calendar_summary}. "
+                    f"Top 3: {prio_summary}. "
+                    f"Write ONE closing line for Stef's day overview — "
+                    f"max 10 words, specific to his actual day, honest, no fluff. "
+                    f"Just the line, no quotes."
+                )}]
+            )
+        )
+        closing = closing_resp.content[0].text.strip().replace('_', '').replace('*', '')
+    except Exception:
+        closing = "Maak er wat van."
+
+    msg = (
+        f"☀️ *{date_str}*\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📅 *Agenda*\n{calendar_block}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎯 *Top 3*\n{prio_block}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 *Habits*\n{habits_block}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"_{closing}_"
+    )
+
+    try:
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    except Exception:
+        await update.message.reply_text(msg)
+
+
 async def show_priorities(update: Update, context: ContextTypes.DEFAULT_TYPE):
     priorities = load_context("current-priorities.md")
     text = f"*Your current priorities:*\n\n{priorities}\n\n_Tell me to update them anytime._"
@@ -867,7 +1129,7 @@ async def test_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def evening_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Sending evening check-in...")
-    messages = [{"role": "user", "content": "Send me a short evening check-in. Brief reflection — what's worth thinking about before I wind down?"}]
+    messages = [{"role": "user", "content": "Send me a short evening check-in. First fetch tomorrow's weather with get_weather. Then: a brief check on today (habits, progress on priorities), one honest reflection worth sitting with before sleep, and close with tomorrow's weather as a practical heads-up. Keep it tight and conversational, not a report."}]
     reply = await run_with_tools(messages, max_tokens=512)
     await update.message.reply_text(reply)
 
@@ -886,7 +1148,7 @@ async def send_morning_checkin(bot):
 async def send_evening_checkin(bot):
     if not STEF_CHAT_ID:
         return
-    messages = [{"role": "user", "content": "Send me a short evening check-in. Ask me briefly how today went — did I hit my habits (sport, screen time under 3h, any reading)? Give a short reflection on what matters before I wind down. Keep it conversational, not a report."}]
+    messages = [{"role": "user", "content": "Send me a short evening check-in. First fetch tomorrow's weather with get_weather. Then: a brief check on today (habits, progress on priorities), one honest reflection worth sitting with before sleep, and close with tomorrow's weather as a practical heads-up. Keep it tight and conversational, not a report."}]
     reply = await run_with_tools(messages, max_tokens=512)
     try:
         await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply, parse_mode="Markdown")
@@ -940,6 +1202,8 @@ def main():
     app.add_handler(CommandHandler("test", test_checkin))
     app.add_handler(CommandHandler("evening", evening_checkin))
     app.add_handler(CommandHandler("priorities", show_priorities))
+    app.add_handler(CommandHandler("morgen", set_morning_priorities))
+    app.add_handler(CommandHandler("dag", dag_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))

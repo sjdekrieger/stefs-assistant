@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Morning Check-in</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #f5f5f7;
+      min-height: 100vh;
+      padding: 32px 16px 80px;
+      color: #1a1a1a;
+    }
+
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    header { padding: 4px 2px 8px; }
+
+    .date {
+      font-size: 13px;
+      color: #999;
+      text-transform: capitalize;
+      margin-bottom: 6px;
+    }
+
+    h1 {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+    }
+
+    .card {
+      background: white;
+      border-radius: 12px;
+      border: 0.5px solid #e8e8e8;
+      padding: 20px 22px;
+    }
+
+    .card-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: #aaa;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 14px;
+    }
+
+    /* Quote */
+    .quote-card { border-left: 3px solid #7F77DD; }
+
+    .quote-text {
+      font-size: 16px;
+      line-height: 1.65;
+      color: #2a2a2a;
+      font-style: italic;
+      margin-bottom: 10px;
+    }
+
+    .quote-text.loading { color: #ccc; font-style: normal; }
+
+    .quote-author { font-size: 13px; color: #999; }
+
+    /* Habits */
+    .habit-row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 12px 0;
+      border-bottom: 0.5px solid #f2f2f2;
+    }
+
+    .habit-row:last-child { border-bottom: none; }
+
+    .habit-label {
+      font-size: 14px;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .dots-row {
+      display: flex;
+      gap: 5px;
+      align-items: flex-end;
+    }
+
+    .dot-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .day-label {
+      font-size: 9px;
+      color: #ccc;
+      font-weight: 500;
+      text-transform: uppercase;
+    }
+
+    .dot {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      border: 1.5px solid #e0e0e0;
+      cursor: pointer;
+      transition: all 0.12s ease;
+      background: white;
+    }
+
+    .dot:hover:not(.future) { border-color: #7F77DD; }
+
+    .dot.done {
+      background: #7F77DD;
+      border-color: #7F77DD;
+    }
+
+    .dot.today:not(.done) {
+      border-color: #7F77DD;
+      border-width: 2px;
+    }
+
+    .dot.done.today {
+      box-shadow: 0 0 0 3px rgba(127, 119, 221, 0.18);
+    }
+
+    .dot.future {
+      opacity: 0.22;
+      cursor: default;
+    }
+
+    .streak {
+      font-size: 12px;
+      color: #ddd;
+      min-width: 36px;
+      text-align: right;
+    }
+
+    .streak.on { color: #7F77DD; }
+
+    /* Priorities */
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+
+    .badge {
+      font-size: 11px;
+      font-weight: 500;
+      background: #f0eefd;
+      color: #7F77DD;
+      padding: 3px 9px;
+      border-radius: 99px;
+    }
+
+    .priority-row {
+      display: flex;
+      align-items: center;
+      gap: 13px;
+      padding: 11px 0;
+      border-bottom: 0.5px solid #f2f2f2;
+    }
+
+    .priority-row:last-child { border-bottom: none; }
+
+    .priority-num {
+      font-size: 14px;
+      font-weight: 700;
+      color: #7F77DD;
+      width: 18px;
+      flex-shrink: 0;
+    }
+
+    .priority-row input {
+      flex: 1;
+      border: none;
+      outline: none;
+      font-size: 14px;
+      font-family: inherit;
+      color: #1a1a1a;
+      background: transparent;
+    }
+
+    .priority-row input::placeholder { color: #d5d5d5; }
+
+    /* Intention */
+    .intention-input {
+      width: 100%;
+      border: none;
+      outline: none;
+      font-size: 26px;
+      font-weight: 700;
+      font-family: inherit;
+      color: #1a1a1a;
+      letter-spacing: -0.5px;
+      background: transparent;
+    }
+
+    .intention-input::placeholder { color: #e5e5e5; }
+
+    /* Agenda */
+    .agenda-placeholder {
+      font-size: 14px;
+      color: #ccc;
+      text-align: center;
+      padding: 12px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <header>
+      <div class="date" id="date-display"></div>
+      <h1>Good morning, Stef ☀️</h1>
+    </header>
+
+    <section class="card quote-card">
+      <p class="quote-text loading" id="quote-text">Laden...</p>
+      <p class="quote-author" id="quote-author"></p>
+    </section>
+
+    <section class="card">
+      <div class="card-label">Daily Habits</div>
+      <div id="habits-container"></div>
+    </section>
+
+    <section class="card">
+      <div class="section-header">
+        <div class="card-label" style="margin-bottom:0">✓ Top 3 priorities</div>
+        <span class="badge">via Telegram</span>
+      </div>
+      <div class="priority-row">
+        <span class="priority-num">1</span>
+        <input type="text" id="p1" placeholder="Nog geen priorities voor vandaag">
+      </div>
+      <div class="priority-row">
+        <span class="priority-num">2</span>
+        <input type="text" id="p2" placeholder="Stuur /priorities via Telegram">
+      </div>
+      <div class="priority-row">
+        <span class="priority-num">3</span>
+        <input type="text" id="p3" placeholder="...">
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-label">Intention</div>
+      <input type="text" class="intention-input" placeholder="Eén woord voor vandaag...">
+    </section>
+
+    <section class="card">
+      <div class="card-label">Vandaag</div>
+      <p class="agenda-placeholder">Google Calendar — binnenkort</p>
+    </section>
+
+  </div>
+
+  <script>
+    const DAYS = ['Ma', 'Di', 'Wo', 'Do', 'Vr', 'Za', 'Zo'];
+    const HABITS = [
+      { id: 'walk',     label: '🚶 30 min wandelen' },
+      { id: 'no_phone', label: '📵 Geen telefoon ochtend' },
+      { id: 'clients',  label: '🔍 Facebook & Reddit klanten' },
+    ];
+
+    const todayIndex = (new Date().getDay() + 6) % 7; // Mon=0, Sun=6
+    let weekKey = '';
+    let habitsData = {};
+
+    // Date header
+    document.getElementById('date-display').textContent = new Date().toLocaleDateString('nl-NL', {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+    });
+
+    // --- Quote ---
+    async function loadQuote() {
+      try {
+        const r = await fetch('/api/quote');
+        const d = await r.json();
+        const el = document.getElementById('quote-text');
+        el.textContent = `"${d.quote}"`;
+        el.classList.remove('loading');
+        document.getElementById('quote-author').textContent = `— ${d.author}`;
+      } catch {
+        document.getElementById('quote-text').textContent = '"Start before you\'re ready."';
+        document.getElementById('quote-author').textContent = '— Steven Pressfield';
+      }
+    }
+
+    // --- Priorities ---
+    async function loadPriorities() {
+      try {
+        const r = await fetch('/api/priorities');
+        const ps = await r.json();
+        if (ps[0]) document.getElementById('p1').value = ps[0];
+        if (ps[1]) document.getElementById('p2').value = ps[1];
+        if (ps[2]) document.getElementById('p3').value = ps[2];
+      } catch {}
+    }
+
+    // --- Habits ---
+    function calcStreak(id) {
+      let s = 0;
+      for (let i = todayIndex; i >= 0; i--) {
+        if (habitsData[id]?.[i]) s++;
+        else break;
+      }
+      return s;
+    }
+
+    function renderHabits() {
+      const container = document.getElementById('habits-container');
+      container.innerHTML = '';
+
+      HABITS.forEach(({ id, label }) => {
+        const streak = calcStreak(id);
+        const row = document.createElement('div');
+        row.className = 'habit-row';
+
+        const lbl = document.createElement('span');
+        lbl.className = 'habit-label';
+        lbl.textContent = label;
+        row.appendChild(lbl);
+
+        const dotsEl = document.createElement('div');
+        dotsEl.className = 'dots-row';
+
+        DAYS.forEach((day, i) => {
+          const col = document.createElement('div');
+          col.className = 'dot-col';
+
+          const dayLbl = document.createElement('span');
+          dayLbl.className = 'day-label';
+          dayLbl.textContent = day;
+
+          const dot = document.createElement('div');
+          dot.className = 'dot';
+          if (habitsData[id]?.[i]) dot.classList.add('done');
+          if (i === todayIndex) dot.classList.add('today');
+          if (i > todayIndex) {
+            dot.classList.add('future');
+          } else {
+            dot.addEventListener('click', () => toggleHabit(id, i));
+          }
+
+          col.appendChild(dayLbl);
+          col.appendChild(dot);
+          dotsEl.appendChild(col);
+        });
+
+        row.appendChild(dotsEl);
+
+        const streakEl = document.createElement('span');
+        streakEl.className = 'streak' + (streak > 0 ? ' on' : '');
+        streakEl.textContent = streak > 0 ? `🔥 ${streak}` : '';
+        row.appendChild(streakEl);
+
+        container.appendChild(row);
+      });
+    }
+
+    async function toggleHabit(id, i) {
+      if (!habitsData[id]) habitsData[id] = [false, false, false, false, false, false, false];
+      const newVal = !habitsData[id][i];
+      habitsData[id][i] = newVal;
+      renderHabits();
+
+      await fetch('/api/habits', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ habit: id, weekKey, dayIndex: i, value: newVal }),
+      });
+    }
+
+    async function loadHabits() {
+      try {
+        const r = await fetch('/api/habits');
+        const d = await r.json();
+        weekKey = d.weekKey;
+        habitsData = d.habits;
+      } catch {}
+      renderHabits();
+    }
+
+    // Init
+    loadQuote();
+    loadPriorities();
+    loadHabits();
+  </script>
+</body>
+</html>
