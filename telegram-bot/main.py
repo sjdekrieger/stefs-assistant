@@ -261,6 +261,7 @@ def init_db():
                     last_reset_streak INTEGER DEFAULT 0
                 )
             """)
+            cur.execute("ALTER TABLE streaks ADD COLUMN IF NOT EXISTS last_reset_streak INTEGER DEFAULT 0")
         conn.commit()
         logger.info("DB initialized")
     finally:
@@ -1430,7 +1431,10 @@ async def send_weekly_review(bot):
 
 
 async def post_init(application: Application):
-    init_db()
+    try:
+        init_db()
+    except Exception as e:
+        logger.error(f"init_db failed: {e}")
     if STEF_CHAT_ID:
         scheduler = AsyncIOScheduler(timezone=pytz.timezone("Europe/Amsterdam"))
         scheduler.add_job(send_morning_checkin, "cron", hour=7, minute=0, args=[application.bot])
@@ -1439,10 +1443,13 @@ async def post_init(application: Application):
         scheduler.add_job(check_reminders, "interval", minutes=1, args=[application.bot])
         scheduler.add_job(check_deadlines, "cron", hour=8, minute=0, args=[application.bot])
         scheduler.add_job(schedule_daily_streak_reminders, "cron", hour=7, minute=5, args=[application.bot, scheduler])
-        await schedule_daily_streak_reminders(application.bot, scheduler)
+        try:
+            await schedule_daily_streak_reminders(application.bot, scheduler)
+        except Exception as e:
+            logger.error(f"schedule_daily_streak_reminders failed on startup: {e}")
         scheduler.start()
         application.bot_data["scheduler"] = scheduler
-        logger.info("Scheduled: morning 07:00, evening 23:00 (Mon-Sat), weekly review 23:00 (Sun), streak reminders 13:00/18:00/21:00")
+        logger.info("Scheduled: morning 07:00, evening 23:00 (Mon-Sat), weekly review 23:00 (Sun), streak reminders random")
     else:
         logger.info("STEF_CHAT_ID not set — scheduled messages disabled")
 
