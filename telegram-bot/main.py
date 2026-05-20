@@ -1443,13 +1443,13 @@ async def post_init(application: Application):
         scheduler.add_job(check_reminders, "interval", minutes=1, args=[application.bot])
         scheduler.add_job(check_deadlines, "cron", hour=8, minute=0, args=[application.bot])
         scheduler.add_job(schedule_daily_streak_reminders, "cron", hour=7, minute=5, args=[application.bot, scheduler])
+        scheduler.start()
+        application.bot_data["scheduler"] = scheduler
+        logger.info("Scheduler started: morning 07:00, evening 23:00, weekly review 23:00 (Sun)")
         try:
             await schedule_daily_streak_reminders(application.bot, scheduler)
         except Exception as e:
             logger.error(f"schedule_daily_streak_reminders failed on startup: {e}")
-        scheduler.start()
-        application.bot_data["scheduler"] = scheduler
-        logger.info("Scheduled: morning 07:00, evening 23:00 (Mon-Sat), weekly review 23:00 (Sun), streak reminders random")
     else:
         logger.info("STEF_CHAT_ID not set — scheduled messages disabled")
 
