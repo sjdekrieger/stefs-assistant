@@ -118,8 +118,9 @@ Scheduled messages you send automatically:
 If Stef asks why he didn't receive one, it was likely a server restart around that time — not a missing feature.
 
 ## When Stef Asks for a Check-in
-- Morning: help him plan the day with clear priorities — what matters most today?
-- Evening: short reflection — what got done, what didn't, how did it feel?
+- Morning: check his calendar first, then tell him what's happening and what matters most — don't ask what he has planned, you can already see it
+- Evening: check today's calendar first, then reflect on what happened — don't ask what he did if you can see it on the calendar
+- Ask follow-up questions only for things you genuinely can't know (how something felt, a decision he's weighing) — not for facts the calendar already has
 - Keep both grounded and actionable, not motivational fluff
 
 ## When He's Stuck or Scattered
@@ -1337,7 +1338,7 @@ async def test_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def evening_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Sending evening check-in...")
-    messages = [{"role": "user", "content": "Send me a short evening check-in. First fetch tomorrow's weather with get_weather and check tomorrow's calendar. Then: one win from today (ask me to name it, or pick something from the calendar if obvious), one honest reflection worth sitting with before sleep, and close with a quick preview of tomorrow — what's on the schedule and the weather. Keep it tight, conversational, and with a bit of dry humour — not a report, not a pep talk."}]
+    messages = [{"role": "user", "content": "Send me a short evening check-in. First check today's calendar with get_calendar_events to see what actually happened today, then fetch tomorrow's weather with get_weather and check tomorrow's calendar. Pick one concrete win from what's on today's calendar — don't ask me to name it, you can already see my day. Add one honest reflection worth sitting with before sleep, then close with a quick preview of tomorrow — what's on the schedule and the weather. Keep it tight, conversational, and with a bit of dry humour — not a report, not a pep talk."}]
     reply = await run_with_tools(messages, max_tokens=512)
     await update.message.reply_text(reply)
 
@@ -1366,7 +1367,7 @@ async def send_morning_checkin(bot):
 async def send_evening_checkin(bot):
     if not STEF_CHAT_ID:
         return
-    messages = [{"role": "user", "content": "Send me a short evening check-in. First fetch tomorrow's weather with get_weather and check tomorrow's calendar. Then: one win from today (ask me to name it, or pick something from the calendar if obvious), one honest reflection worth sitting with before sleep, and close with a quick preview of tomorrow — what's on the schedule and the weather. Keep it tight, conversational, and with a bit of dry humour — not a report, not a pep talk."}]
+    messages = [{"role": "user", "content": "Send me a short evening check-in. First check today's calendar with get_calendar_events to see what actually happened today, then fetch tomorrow's weather with get_weather and check tomorrow's calendar. Pick one concrete win from what's on today's calendar — don't ask me to name it, you can already see my day. Add one honest reflection worth sitting with before sleep, then close with a quick preview of tomorrow — what's on the schedule and the weather. Keep it tight, conversational, and with a bit of dry humour — not a report, not a pep talk."}]
     reply = await run_with_tools(messages, max_tokens=512)
     try:
         await bot.send_message(chat_id=int(STEF_CHAT_ID), text=reply, parse_mode="Markdown")
